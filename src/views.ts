@@ -96,12 +96,33 @@ function progressLines(state: ProviderState): ProgressLine[] {
   return (state.snapshot?.lines ?? []).filter((line): line is ProgressLine => line.type === 'progress');
 }
 
+export type BarStyle = 'scattered' | 'subtle' | 'contrast' | 'solid';
+
+function darkenBar(hex: string, factor = 0.45): string {
+  if (!hex.startsWith('#') || hex.length < 7) {
+    return theme.chartDim;
+  }
+  const num = Number.parseInt(hex.slice(1, 7), 16);
+  const r = Math.round(((num >> 16) & 0xff) * factor);
+  const g = Math.round(((num >> 8) & 0xff) * factor);
+  const b = Math.round((num & 0xff) * factor);
+  return `#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1)}`;
+}
+
 /**
- * Continuous bars like pr-stats: painted cells with an eighth-cell tip.
- * Timing belongs in the annotations, so it cannot split the fill or hide
- * a small nonzero value at the start of a period.
+ * Continuous bars with 1-pixel retro dither:
+ * - 'scattered': Opción A (~28% celdas con micropíxeles de 1px dispersos)
+ * - 'subtle': Opción B (100% celdas con tramado sutil de micropíxeles de 1px)
+ * - 'contrast': Opción C (100% celdas con tramado más oscuro de micropíxeles de 1px)
+ * - 'solid': barra lisa sin tramado
  */
-function bar(value: number, width: number, color: string): Span[] {
+function bar(
+  value: number,
+  width: number,
+  color: string,
+  style: BarStyle = 'scattered',
+  seed = 0,
+): Span[] {
   const used = Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0;
   const cells = used * width;
   let whole = Math.floor(cells);
@@ -120,7 +141,32 @@ function bar(value: number, width: number, color: string): Span[] {
   const spans: Span[] = [];
 
   if (whole > 0) {
-    spans.push({ text: ' '.repeat(whole), bg: color });
+    if (style === 'solid') {
+      spans.push({ text: ' '.repeat(whole), bg: color });
+    } else if (style === 'subtle') {
+      const darkFg = darkenBar(color, 0.65);
+      spans.push({ text: '░'.repeat(whole), fg: darkFg, bg: color });
+    } else if (style === 'contrast') {
+      const darkFg = darkenBar(color, 0.40);
+      spans.push({ text: '░'.repeat(whole), fg: darkFg, bg: color });
+    } else {
+      // 'scattered': ~28% random cells have 1-pixel stipple
+      const darkFg = darkenBar(color, 0.45);
+      const cellSpans: Span[] = [];
+
+      for (let i = 0; i < whole; i++) {
+        const h = Math.abs(Math.sin((seed + 1) * 37.17 + (i + 1) * 19.31)) * 10000;
+        const frac = h - Math.floor(h);
+
+        if (frac < 0.28) {
+          cellSpans.push({ text: '░', fg: darkFg, bg: color });
+        } else {
+          cellSpans.push({ text: ' ', bg: color });
+        }
+      }
+
+      spans.push(...merge(cellSpans));
+    }
   }
 
   if (partial > 0) {
@@ -259,11 +305,13 @@ function quotaRow(
   now: number,
   showReset: boolean,
   highlight: boolean,
+  style: BarStyle = 'scattered',
+  seed = 0,
 ): Line {
   const used = fraction(line);
   const row: Line = [
     { text: `${shortLabel(line.label, labelWidth)} `, fg: theme.muted },
-    ...bar(used, barWidth, barColor(used, highlight)),
+    ...bar(used, barWidth, barColor(used, highlight), style, seed),
     { text: padStart(formatPercent(used), 6), fg: used === 0 ? theme.dim : theme.text },
   ];
 
@@ -401,11 +449,15 @@ function quotaRows(
   const tightest = lines.reduce((best, line, i) => (fraction(line) > fraction(lines[best] ?? line) ? i : best), 0);
   const compact = availableWidth < 40;
   const compactBarWidth = Math.max(4, availableWidth - 7);
-  const rows = lines.flatMap((line, i) => compact ? [
-    ...annotationRows([{ text: line.label, fg: theme.muted }], availableWidth),
-    [...bar(fraction(line), compactBarWidth, barColor(fraction(line), i === tightest)),
-      { text: padStart(formatPercent(fraction(line)), 6), fg: theme.text }],
-  ] : [quotaRow(line, labelWidth, barWidth, now, showReset, i === tightest && fraction(line) > 0)]);
+  const STYLES: BarStyle[] = ['scattered', 'subtle', 'contrast'];
+  const rows = lines.flatMap((line, i) => {
+    const style = STYLES[i % STYLES.length]!;
+    return compact ? [
+      ...annotationRows([{ text: line.label, fg: theme.muted }], availableWidth),
+      [...bar(fraction(line), compactBarWidth, barColor(fraction(line), i === tightest), style, i + 1),
+        { text: padStart(formatPercent(fraction(line)), 6), fg: theme.text }],
+    ] : [quotaRow(line, labelWidth, barWidth, now, showReset, i === tightest && fraction(line) > 0, style, i + 1)];
+  });
 
   if (lines.length > 0) {
     rows.push(...axisRows(compact ? -1 : labelWidth, compact ? compactBarWidth : barWidth));
@@ -692,7 +744,7 @@ function compactResetRows(entry: ResetEntry, options: ViewOptions, width: number
   const barWidth = Math.max(4, Math.min(40, width - 2));
   lines.push([
     { text: '  ' },
-    ...bar(used, barWidth, resetUsageColor(entry, options, isFocus)),
+    ...bar(used, barWidth, resetUsageColor(entry, options, isFocus), 'subtle', 1),
   ], ...axisRows(1, barWidth));
   lines.push(...annotationRows([
     { text: `${formatPercent(used)} used`, fg: theme.text, bold: true },
@@ -745,7 +797,7 @@ function resetsCard(resets: ResetEntry[], focus: ResetEntry | null, options: Vie
       const row: Line = [
         { text: selected ? '◆ ' : '● ', fg: selected ? theme.accent : brandColor(entry.state.id), icon: entry.state.id },
         { text: shortLabel(name, nameWidth) + '  ', fg: selected ? theme.accent : theme.text },
-        ...bar(used, barWidth, resetUsageColor(entry, options, selected)),
+        ...bar(used, barWidth, resetUsageColor(entry, options, selected), 'scattered', 1),
         { text: ' ' + padStart(formatPercent(used), 6), fg: theme.text },
         { text: '   ' + padStart(formatDuration(Date.parse(entry.line.resetsAt!) - options.now), resetWidth), fg: selected ? theme.accent : theme.muted },
       ];
