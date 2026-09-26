@@ -783,7 +783,7 @@ export function providerView(
   const lines = progressLines(state);
 
   const strip: Line[] = [
-    [{ ...brandMark(state.id), icon: state.id }, ...statusSubtitle(state, options)],
+    statusSubtitle(state, options),
     [
       { text: String(lines.length), fg: theme.text, bold: true },
       { text: lines.length === 1 ? ' quota' : ' quotas', fg: theme.muted },

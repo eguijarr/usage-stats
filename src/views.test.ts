@@ -117,12 +117,12 @@ describe('views', () => {
     expect(plotted.cards[1]!.lines.length).toBe(8);
   });
 
-  test('providerView sets headingIcon and includes provider icon in the strip', () => {
+  test('providerView sets headingIcon for heading and keeps strip clean without redundant icon', () => {
     const provider = state('claude', [weekly(40, 3)]);
     const view = providerView(provider, [], WINDOWS[1]!, OPTIONS, 60);
     expect(view.headingIcon).toBe('claude');
     expect(view.heading).toBe('claude');
-    expect(view.strip[0]?.[0]?.icon).toBe('claude');
+    expect(view.strip[0]?.[0]?.icon).toBeUndefined();
   });
 });
 
