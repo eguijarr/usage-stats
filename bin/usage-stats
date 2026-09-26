@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# Launches the usage-stats TUI.
+#   usage-stats [flags]       run in the current terminal
+#   usage-stats --bg [flags]  keep it running in the background and attach to it
+#                             (dtach when installed, tmux otherwise)
+#   usage-stats --wt [flags]  open it in a new Windows Terminal pane (from WSL)
+#   usage-stats --wt-tab      open it in a full-width tab with the same profile
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+BUN="${BUN:-$(command -v bun || echo "$HOME/.bun/bin/bun")}"
+SESSION=usage-stats
+
+if [[ ! -x "$BUN" ]]; then
+  echo "usage-stats needs Bun. Run install.sh from the project folder, or install it from https://bun.sh" >&2
+  exit 1
+fi
+
+if [[ ! -d "$ROOT/node_modules/@opentui" ]]; then
+  (cd "$ROOT" && "$BUN" install --frozen-lockfile --production --omit=peer >/dev/null)
+fi
+
+# Opens usage-stats in a new Windows Terminal pane next to the current one,
+# straight into WSL. Useful from inside terminal multiplexers,
+# which cannot forward Windows Terminal's sixel images: the new pane talks
+# to Windows Terminal directly, so the vendor logos show.
+if [[ "${1:-}" == "--wt" || "${1:-}" == "--wt-tab" ]]; then
+  window_mode="$1"
+  shift
+  # the current Windows user's profile, which Windows itself reports
+  cmd="$(command -v cmd.exe || echo /mnt/c/Windows/System32/cmd.exe)"
+  winhome="${USAGE_STATS_WINDOWS_HOME:-}"
+  if [[ -z "$winhome" && -x "$cmd" ]]; then
+    winhome="$(wslpath -u "$(cd / && "$cmd" /c 'echo %USERPROFILE%' 2>/dev/null | tr -d '\r')" 2>/dev/null || true)"
+  fi
+
+  # wt.exe is a per-user app alias, so off PATH it comes from that profile
+  wt="$(command -v wt.exe || true)"
+  if [[ -z "$wt" && -n "$winhome" && -e "$winhome/AppData/Local/Microsoft/WindowsApps/wt.exe" ]]; then
+    wt="$winhome/AppData/Local/Microsoft/WindowsApps/wt.exe"
+  fi
+  if [[ -z "$wt" ]]; then
+    echo "$window_mode needs Windows Terminal (wt.exe), run from WSL" >&2
+    exit 1
+  fi
+
+  # the pr-stats look (font, colors) from scripts/install-wt-profile.sh
+  look=()
+  if [[ -e "$winhome/AppData/Local/Microsoft/Windows Terminal/Fragments/usage-stats/usage-stats.json" ]]; then
+    look=(--profile usage-stats)
+  fi
+
+  distro=()
+  [[ -n "${WSL_DISTRO_NAME:-}" ]] && distro=(-d "$WSL_DISTRO_NAME")
+  if [[ "$window_mode" == --wt-tab ]]; then
+    exec "$wt" -w 0 new-tab "${look[@]}" \
+      wsl.exe "${distro[@]}" -- bash -lc "$(printf '%q ' "$ROOT/bin/usage-stats" "$@")"
+  fi
+  # -w 0 targets the current window, -V splits side by side, 40% for the new pane
+  exec "$wt" -w 0 split-pane -V --size "${USAGE_STATS_WT_SIZE:-0.4}" "${look[@]}" \
+    wsl.exe "${distro[@]}" -- bash -lc "$(printf '%q ' "$ROOT/bin/usage-stats" "$@")"
+fi
+
+if [[ "${1:-}" == "--bg" ]]; then
+  shift
+
+  # dtach relays the program's output byte for byte, so the terminal's image
+  # protocol (Kitty or Sixel) reaches it and the vendor logos show. On
+  # reattach it sends Ctrl-L, which makes the TUI repaint, logos included.
+  # Detach with Ctrl-\ .
+  if command -v dtach >/dev/null && [[ "${USAGE_STATS_BG:-dtach}" != tmux ]]; then
+    runtime="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/usage-stats-$(id -u)"
+    if [[ ! -e "$runtime" && ! -L "$runtime" ]]; then
+      mkdir -m 700 "$runtime"
+    fi
+    if [[ ! -d "$runtime" || -L "$runtime" || ! -O "$runtime" ]]; then
+      echo "Cannot use the background socket directory safely." >&2
+      exit 1
+    fi
+    chmod 700 "$runtime"
+    umask 077
+    socket="$runtime/session.sock"
+    exec dtach -A "$socket" -r ctrl_l -z "$BUN" "$ROOT/src/main.tsx" "$@"
+  fi
+
+  if ! command -v tmux >/dev/null; then
+    echo "--bg needs dtach or tmux (e.g. sudo apt install dtach / brew install dtach)" >&2
+    exit 1
+  fi
+  if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+    tmux new-session -d -s "$SESSION" "$(printf '%q ' "$BUN" "$ROOT/src/main.tsx" "$@")"
+  fi
+  if [[ -n "${TMUX:-}" ]]; then
+    exec tmux switch-client -t "$SESSION"
+  fi
+  exec tmux attach -t "$SESSION"
+fi
+
+exec "$BUN" "$ROOT/src/main.tsx" "$@"

@@ -1,0 +1,43 @@
+MIT License
+
+Copyright (c) 2026 usage-stats contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+-------------------------------------------------------------------------------
+Third-party work this project derives from, both under the MIT License:
+
+- pr-stats (https://github.com/d3lm/pr-stats)
+  Copyright (c) 2026 Dominic Elm
+  The terminal UI layout, palette, and src/components/scrollbar.ts and
+  Spinner.tsx follow or copy pr-stats.
+
+- OpenUsage / CrossUsage (https://github.com/robinebers/openusage,
+  https://github.com/barramee27/crossusage)
+  Copyright (c) 2026 Robin Ebers, Copyright (c) 2026 barramee kottanawadee
+  The provider logic in src/providers/ is a TypeScript port of their
+  claude, codex, cursor, antigravity-cli, and devin plugins.
+
+- Vendor logos in assets/icons/ come from the same OpenUsage/CrossUsage
+  plugins. The logos themselves are trademarks of their owners (Anthropic,
+  OpenAI, Anysphere, Google, Cognition) and are used only to identify each
+  service; this project is not affiliated with or endorsed by them.
+
+- IBM Plex Mono in assets/fonts/ is Copyright 2017 IBM Corp. and licensed
+  under the SIL Open Font License 1.1 (assets/fonts/IBMPlexMono-OFL.txt).

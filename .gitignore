@@ -1,0 +1,25 @@
+node_modules/
+*.tmp
+
+# Local logins, environment overrides and generated usage data
+.env
+.env.*
+!.env.example
+!.env.sample
+.claude/
+.codex/
+.gemini/
+auth.json
+.credentials.json
+credentials.json
+credentials.toml
+oauth_creds.json
+antigravity-oauth-token
+*.pem
+*.key
+*.p12
+*.pfx
+*.vscdb*
+history.jsonl
+*.log
+coverage/

@@ -1,0 +1,31 @@
+{
+  "name": "usage-stats",
+  "version": "0.1.0",
+  "description": "Live AI subscription usage (Claude, Codex, Cursor, Antigravity CLI, Devin) in a pr-stats style terminal UI",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "usage-stats": "bin/usage-stats"
+  },
+  "scripts": {
+    "start": "bun src/main.tsx",
+    "check": "tsc --noEmit",
+    "test": "bun test",
+    "json": "bun src/main.tsx --json",
+    "icons": "bun scripts/build-icons.ts",
+    "preview": "bun scripts/build-preview.tsx"
+  },
+  "dependencies": {
+    "@opentui/core": "^0.5.8",
+    "@opentui/react": "^0.5.8",
+    "asciichart": "^1.5.25",
+    "react": "^19.2.8"
+  },
+  "devDependencies": {
+    "@resvg/resvg-js": "^2.6.2",
+    "@types/asciichart": "^1.5.8",
+    "@types/bun": "^1.4.0",
+    "@types/react": "^19.2.18",
+    "typescript": "^6.0.3"
+  }
+}
