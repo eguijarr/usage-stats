@@ -111,16 +111,16 @@ function darkenBar(hex: string, factor = 0.45): string {
 
 /**
  * Continuous bars with 1-pixel retro dither:
- * - 'scattered': Opción A (~28% celdas con micropíxeles de 1px dispersos)
- * - 'subtle': Opción B (100% celdas con tramado sutil de micropíxeles de 1px)
- * - 'contrast': Opción C (100% celdas con tramado más oscuro de micropíxeles de 1px)
+ * - 'subtle': tramado sutil uniforme de micropíxeles de 1px en toda la zona coloreada (por defecto)
+ * - 'contrast': tramado de micropíxeles con mayor contraste
+ * - 'scattered': celdas con micropíxeles dispersos aleatoriamente
  * - 'solid': barra lisa sin tramado
  */
 function bar(
   value: number,
   width: number,
   color: string,
-  style: BarStyle = 'scattered',
+  style: BarStyle = 'subtle',
   seed = 0,
 ): Span[] {
   const used = Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0;
@@ -305,7 +305,7 @@ function quotaRow(
   now: number,
   showReset: boolean,
   highlight: boolean,
-  style: BarStyle = 'scattered',
+  style: BarStyle = 'subtle',
   seed = 0,
 ): Line {
   const used = fraction(line);
@@ -449,14 +449,12 @@ function quotaRows(
   const tightest = lines.reduce((best, line, i) => (fraction(line) > fraction(lines[best] ?? line) ? i : best), 0);
   const compact = availableWidth < 40;
   const compactBarWidth = Math.max(4, availableWidth - 7);
-  const STYLES: BarStyle[] = ['scattered', 'subtle', 'contrast'];
   const rows = lines.flatMap((line, i) => {
-    const style = STYLES[i % STYLES.length]!;
     return compact ? [
       ...annotationRows([{ text: line.label, fg: theme.muted }], availableWidth),
-      [...bar(fraction(line), compactBarWidth, barColor(fraction(line), i === tightest), style, i + 1),
+      [...bar(fraction(line), compactBarWidth, barColor(fraction(line), i === tightest), 'subtle'),
         { text: padStart(formatPercent(fraction(line)), 6), fg: theme.text }],
-    ] : [quotaRow(line, labelWidth, barWidth, now, showReset, i === tightest && fraction(line) > 0, style, i + 1)];
+    ] : [quotaRow(line, labelWidth, barWidth, now, showReset, i === tightest && fraction(line) > 0, 'subtle')];
   });
 
   if (lines.length > 0) {
@@ -797,7 +795,7 @@ function resetsCard(resets: ResetEntry[], focus: ResetEntry | null, options: Vie
       const row: Line = [
         { text: selected ? '◆ ' : '● ', fg: selected ? theme.accent : brandColor(entry.state.id), icon: entry.state.id },
         { text: shortLabel(name, nameWidth) + '  ', fg: selected ? theme.accent : theme.text },
-        ...bar(used, barWidth, resetUsageColor(entry, options, selected), 'scattered', 1),
+        ...bar(used, barWidth, resetUsageColor(entry, options, selected), 'subtle', 1),
         { text: ' ' + padStart(formatPercent(used), 6), fg: theme.text },
         { text: '   ' + padStart(formatDuration(Date.parse(entry.line.resetsAt!) - options.now), resetWidth), fg: selected ? theme.accent : theme.muted },
       ];
