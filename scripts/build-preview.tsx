@@ -46,12 +46,14 @@ const views = [overview, { ...overview, cards: overview.cards.filter((card) => !
   providerView(states[0]!, history, WINDOWS[1]!, options, 43)];
 const cellWidth = 6;
 const cellHeight = 12;
-const gap = 8;
+const gap = 16;
 const escape = (value: string) => value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
 const rgb = (color: { toInts(): number[] }) => `rgb(${color.toInts().slice(0, 3).join(',')})`;
-let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${3 * width * cellWidth + 2 * gap}" height="${height * cellHeight}"><rect width="100%" height="100%" fill="${theme.bg}"/>`;
+let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${3 * width * cellWidth + 2 * gap}" height="${height * cellHeight}">`;
 
 for (const [index, view] of views.entries()) {
+  const screenX = index * (width * cellWidth + gap);
+  svg += `<rect x="${screenX}" y="0" width="${width * cellWidth}" height="${height * cellHeight}" fill="${theme.bg}"/>`;
   const scrollRef = createRef<ScrollBoxRenderable | null>();
   const setup = await testRender(
     <box flexDirection="column" width="100%" height="100%" backgroundColor={theme.bg}>
