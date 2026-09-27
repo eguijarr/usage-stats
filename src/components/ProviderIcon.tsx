@@ -147,13 +147,15 @@ let repaintPending = false;
 const decoded = new Map<string, RgbaImage | null>();
 const encoded = new Map<string, string>();
 
-function cellSize(renderer: CliRenderer): { width: number; height: number } {
+export function cellSize(renderer: CliRenderer): { width: number; height: number } {
   const resolution = renderer.resolution;
+  const width = renderer.terminalWidth || renderer.width;
+  const height = renderer.terminalHeight || renderer.height;
 
-  if (resolution && renderer.width > 0 && renderer.height > 0) {
+  if (resolution && width > 0 && height > 0) {
     return {
-      width: Math.max(1, Math.floor(resolution.width / renderer.width)),
-      height: Math.max(1, Math.floor(resolution.height / renderer.height)),
+      width: Math.max(1, Math.floor(resolution.width / width)),
+      height: Math.max(1, Math.floor(resolution.height / height)),
     };
   }
 
@@ -195,7 +197,7 @@ function sixelFor(id: string, width: number, height: number, bg?: string): strin
 function onScreen(renderable: Renderable, rows: number): boolean {
   const y = renderable.screenY;
 
-  if (!renderable.visible || y < 0 || y >= rows - 1) {
+  if (!renderable.visible || y < 0 || y >= rows) {
     return false;
   }
 
@@ -221,8 +223,13 @@ function onScreen(renderable: Renderable, rows: number): boolean {
  */
 function drawSixels(renderer: CliRenderer): void {
   const cell = cellSize(renderer);
-  const visible = [...slots.values()].filter((slot) => onScreen(slot.renderable, renderer.height));
-  const signature = visible.map((slot) => `${slot.id}@${slot.renderable.screenX},${slot.renderable.screenY}@${slot.bg ?? ''}`).join('|');
+  // the footer mode draws its frame below the scrollback, from this terminal row on
+  const offset = (renderer as unknown as { renderOffset?: number }).renderOffset ?? 0;
+  const termHeight = renderer.terminalHeight || renderer.height;
+  const visible = [...slots.values()].filter(
+    (slot) => onScreen(slot.renderable, renderer.height) && offset + slot.renderable.screenY < termHeight - 1,
+  );
+  const signature = `${offset}:` + visible.map((slot) => `${slot.id}@${slot.renderable.screenX},${slot.renderable.screenY}@${slot.bg ?? ''}`).join('|');
 
   if (signature !== lastSignature && lastSignature !== '' && !repaintPending) {
     repaintPending = true;
@@ -244,7 +251,7 @@ function drawSixels(renderer: CliRenderer): void {
     const sixel = sixelFor(slot.id, cell.width * 2, cell.height, slot.bg);
 
     if (sixel !== null) {
-      out += `\x1b[${slot.renderable.screenY + 1};${slot.renderable.screenX + 1}H${sixel}`;
+      out += `\x1b[${offset + slot.renderable.screenY + 1};${slot.renderable.screenX + 1}H${sixel}`;
     }
   }
 
@@ -258,6 +265,16 @@ function drawSixels(renderer: CliRenderer): void {
   } else {
     process.stdout.write(out);
   }
+}
+
+/**
+ * Rewrites every cell of the frame and puts the logos back. The footer
+ * mode needs it after each line it logs: the terminal scrolls the logos
+ * drawn so far along with the text, off the cells OpenTUI keeps blank.
+ */
+export function repaintIcons(renderer: CliRenderer): void {
+  (renderer as unknown as { forceFullRepaintRequested: boolean }).forceFullRepaintRequested = true;
+  renderer.requestRender();
 }
 
 function installOverlay(renderer: CliRenderer): void {
@@ -300,8 +317,8 @@ function SixelSlot({ id, bg }: { id: string; bg?: string }) {
 
 /**
  * A provider's logo, two cells wide and one tall, or its brand-colored dot
- * when the terminal cannot show the logo crisply. Both come with their own
- * one-cell gap, so the text after them lines up the same either way.
+ * when the terminal cannot show the logo crisply. Both reserve three cells,
+ * so the text after them lines up the same either way.
  */
 export function ProviderIcon({
   id,
@@ -331,7 +348,7 @@ export function ProviderIcon({
 
   return (
     <text wrapMode="none" fg={fallbackFg ?? brandColor(id)} bg={bg} flexShrink={0}>
-      {fallbackText ?? '● '}
+      {fallbackText === undefined ? '●  ' : fallbackText.padEnd(3, ' ')}
     </text>
   );
 }

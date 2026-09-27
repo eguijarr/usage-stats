@@ -19,6 +19,10 @@
 
 - 🔄 **En tiempo real**: Consulta periódica automática con cuentas atrás segundo a segundo hacia cada reinicio de cuota.
 - 🎯 **Recomendación inteligente (`Use next`)**: Identifica al instante qué proveedor o modelo conviene usar según vencimiento y porcentaje en riesgo de caducar.
+- 🕘 **Previsiones con tu horario**: Aprende del histórico a qué horas y qué días sueles trabajar (pestaña *Your hours*) y proyecta cada cuota sobre esas horas, no sobre un ritmo uniforme las 24 horas: una cuota semanal cuyo resto cae en noches y fin de semana dejará más saldo sin usar.
+- ⚡ **Consumo rápido**: Compara el ritmo de la última hora con la media del periodo y avisa (`↑ fast`) cuando, a ese ritmo y en tus horas habituales, la cuota se agotaría antes de reiniciarse.
+- 📐 **Plan fit**: Revisa los periodos ya cerrados de cada cuota (pico antes de cada reinicio y veces que se agotó) y dice si tu plan se queda corto, te sobra (con el nivel concreto en Claude: Pro, Max 5x, Max 20x) o encaja.
+- 📜 **Modo footer (`--footer`)**: Unas pocas filas en vivo fijadas bajo el scrollback de la terminal, con un registro con hora de reinicios, umbrales superados, ráfagas y cambios de recomendación que puedes desplazar, buscar y copiar.
 - ⏳ **Línea de tiempo de reinicios**: Vista unificada que agrupa cuotas por sesión, semana y mes, destacando sobreconsumos y bloqueos compartidos.
 - 🔑 **Cero configuración**: Lee automáticamente las sesiones locales ya activas en tu equipo (incluye compatibilidad bidireccional entre WSL y Windows).
 - 🖼️ **Gráficos en terminal**: Iconos vectoriales de alta definición vía **Kitty** o **Sixel**, con alternativa limpia en texto/color si la terminal no los soporta.
@@ -73,6 +77,7 @@ cd usage-stats
 usage-stats                  # Abre el dashboard interactivo
 usage-stats --bg             # Modo segundo plano persistente (dtach / tmux)
 usage-stats --wt             # Panel lateral dividido en Windows Terminal (WSL)
+usage-stats --footer         # Filas en vivo bajo el scrollback, con registro de eventos encima
 usage-stats -p claude,codex  # Filtrar proveedores específicos
 usage-stats -i 30            # Definir intervalo de sondeo (segundos)
 usage-stats --json           # Exportar datos en JSON para scripts
@@ -91,6 +96,9 @@ usage-stats --diagnose       # Diagnóstico de capacidades gráficas de la termi
 | `+` / `-` | Ajustar intervalo de consulta (±15 s) |
 | `q` / `Esc` | Volver al Overview / Salir |
 
+En `--footer` solo se usan `r` / `R` (refrescar), `p` (pausar) y `q` / `Esc` (salir); la rueda del ratón
+queda para la terminal, que desplaza el registro.
+
 ---
 
 ## ⚙️ Configuración
@@ -104,7 +112,8 @@ Puedes personalizar el comportamiento mediante variables de entorno:
 | `USAGE_STATS_ICONS` | Renderizado de iconos: `auto`, `always` o `off` |
 | `USAGE_STATS_BG` | Forzar `tmux` en lugar de `dtach` en el modo `--bg` |
 | `USAGE_STATS_WT_SIZE` | Ancho relativo del panel dividido en Windows Terminal (ej: `0.3`) |
-| `XDG_DATA_HOME` | Directorio para el histórico local de métricas (14 días) |
+| `USAGE_STATS_HISTORY_DAYS` | Días de histórico local (por defecto `62`, entre `7` y `400`) |
+| `XDG_DATA_HOME` | Directorio para el histórico local de métricas |
 
 ---
 
@@ -118,7 +127,9 @@ Puedes personalizar el comportamiento mediante variables de entorno:
 - Claude y Codex guardan sus tokens renovados en el archivo original mediante temporales exclusivos
   de permiso `0600`. En macOS, las escrituras de Claude en el Keychain pasan la credencial por stdin,
   fuera de los argumentos del proceso. Los demás proveedores no guardan tokens renovados en disco.
-- El histórico guarda solo fecha, proveedor, cuota y fracción consumida durante 14 días. En
+- El histórico guarda solo fecha, proveedor, cuota y fracción consumida durante 62 días (configurable);
+  las lecturas de más de 48 horas se compactan a una cada media hora. El perfil horario y el Plan fit se
+  calculan en local a partir de él y no se guardan aparte. En
   Linux/macOS usa un directorio `0700` y un archivo `0600`; en Windows nativo depende de las ACL del
   perfil. Cursor se lee en modo de solo lectura. El socket de dtach usa un directorio privado.
 - Git excluye los archivos habituales de credenciales, `.env`, históricos y logs. El diagnóstico

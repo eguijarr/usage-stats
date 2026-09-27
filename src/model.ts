@@ -37,7 +37,7 @@ export interface Card {
 }
 
 export function lineWidth(line: Line): number {
-  return line.reduce((sum, span) => sum + span.text.length, 0);
+  return line.reduce((sum, span) => sum + span.text.length + (span.icon === undefined ? 0 : 1), 0);
 }
 
 export function card(

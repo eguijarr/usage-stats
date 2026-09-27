@@ -15,11 +15,49 @@ export interface Sample {
   v: number;
 }
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
 /**
- * Keeps two weeks of samples, enough for the 7-day trend window plus a
- * full weekly period before it.
+ * Keeps two months of samples by default: two monthly billing cycles for
+ * the plan fit, and plenty of weeks for the activity profile.
+ * USAGE_STATS_HISTORY_DAYS changes it, from a week (the trend window)
+ * to about a year.
  */
-const RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
+export function retentionMs(env: Record<string, string | undefined> = process.env): number {
+  const days = Number.parseInt(env.USAGE_STATS_HISTORY_DAYS ?? '', 10);
+
+  return (Number.isFinite(days) ? Math.min(400, Math.max(7, days)) : 62) * DAY_MS;
+}
+
+/**
+ * Readings older than this are only needed for the 7-day chart, the plan
+ * fit, and the activity profile, none of which needs every poll.
+ */
+const FULL_DETAIL_MS = 2 * DAY_MS;
+
+/**
+ * Older readings keep one per quota and half hour: the highest, so a
+ * period's peak and a quota that ran out survive the compaction.
+ */
+const COMPACT_BUCKET_MS = 30 * 60_000;
+
+export function compact(samples: Sample[], before: number): Sample[] {
+  const buckets = new Map<string, Sample>();
+  const recent: Sample[] = [];
+
+  for (const sample of samples) {
+    if (sample.t >= before) {
+      recent.push(sample);
+      continue;
+    }
+    const key = `${sample.p}\n${sample.l}\n${Math.floor(sample.t / COMPACT_BUCKET_MS)}`;
+    const kept = buckets.get(key);
+    // the bucket's last time, so a reset inside it still shows in the next one
+    buckets.set(key, kept === undefined ? sample : { ...(sample.v > kept.v ? sample : kept), t: Math.max(kept.t, sample.t) });
+  }
+
+  return [...buckets.values(), ...recent].sort((a, b) => a.t - b.t);
+}
 
 /**
  * A reading equal to the last stored one for its quota is only kept once
@@ -54,15 +92,16 @@ export const HISTORY_FILE = join(
 );
 
 /**
- * Loads the stored samples and rewrites the file without the expired ones,
- * so the history never grows past the retention window.
+ * Loads the stored samples and rewrites the file without the expired ones
+ * and with the old ones compacted, so the history never grows past the
+ * retention window.
  */
-export function loadHistory(file = HISTORY_FILE): Sample[] {
+export function loadHistory(file = HISTORY_FILE, now = Date.now(), retention = retentionMs()): Sample[] {
   if (!existsSync(file)) {
     return [];
   }
 
-  const cutoff = Date.now() - RETENTION_MS;
+  const cutoff = now - retention;
   const samples: Sample[] = [];
 
   const fd = openPrivateHistory(file, false);
@@ -88,7 +127,7 @@ export function loadHistory(file = HISTORY_FILE): Sample[] {
   // Two running instances can interleave their appends; the charts expect time order.
   samples.sort((a, b) => a.t - b.t);
   const last: LastStored = new Map();
-  const kept = thin(samples, last);
+  const kept = compact(thin(samples, last), now - FULL_DETAIL_MS);
   writePrivateHistory(file, kept, false);
   lastStored.set(file, last);
 

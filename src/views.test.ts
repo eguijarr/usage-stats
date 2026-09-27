@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { forecastOf, formatDuration, formatPercent, formatUsed } from './format';
 import type { ProgressLine } from './providers/types';
-import { overviewView, providerView, WINDOWS, type ProviderState } from './views';
+import { footerView, overviewView, providerView, snapshotEvents, WINDOWS, type ProviderState } from './views';
 
 const NOW = Date.parse('2026-09-26T12:00:00Z');
 const DAY = 86_400_000;
@@ -76,7 +76,7 @@ describe('views', () => {
 
     expect(text(view.strip[0]!)).toContain('1 failing');
     expect(text(view.strip[1]!)).toBe('1 quota at risk');
-    expect(view.cards.map((c) => c.title)).toEqual(['Use next', 'Upcoming resets', 'a', 'b', 'c']);
+    expect(view.cards.map((c) => c.title)).toEqual(['Use next', 'Upcoming resets', 'a', 'b', 'c', 'Your hours']);
     expect(view.cards[0]!.lines.map(text).join('\n')).toContain('a Weekly');
     for (const id of ['a', 'b']) {
       const card = view.cards.find((card) => card.title === id)!;
@@ -198,6 +198,19 @@ describe('sixel', () => {
     expect(sixelWithBg.includes('#0;2;28;24;21')).toBe(true);
     expect(sixelWithBg.includes('#1;2;87;45;34')).toBe(true);
     expect(sixelWithBg.endsWith('\x1b\\')).toBe(true);
+  });
+
+  test('measures cell size using the terminal dimensions even in split-footer mode', async () => {
+    const { cellSize } = await import('./components/ProviderIcon');
+    const renderer = {
+      resolution: { width: 1200, height: 800 },
+      width: 80,
+      height: 6, // split-footer height
+      terminalWidth: 80,
+      terminalHeight: 24, // full terminal height
+    } as never;
+
+    expect(cellSize(renderer)).toEqual({ width: 15, height: 33 });
   });
 });
 
@@ -489,5 +502,58 @@ describe('detail-only quotas', () => {
     expect(everything).not.toContain('Claude and GPT');
     expect(everything).toContain('Session');
     expect(providerView(agy, [], WINDOWS[1]!, OPTIONS, 60).cards.flatMap((c) => c.lines.map(text)).join('\n')).toContain('Claude and GPT');
+  });
+});
+
+describe('pace and plan', () => {
+  test('a burst the average hides is flagged and never recommended', () => {
+    // 20% used halfway through the week, but 18 points in the last 40 minutes
+    const burst = [0.02, 0.08, 0.14, 0.2].map((v, i) => ({ t: NOW - (40 - i * 13.3) * 60_000, p: 'a', l: 'Weekly', v }));
+    const view = overviewView([state('a', [weekly(20, 3.5)])], burst, OPTIONS);
+
+    expect(view.strip.map(text)).toContain('1 burning fast');
+    expect(view.cards[0]!.lines.map(text).join('\n')).toContain('No unconstrained quota');
+    const resets = view.cards.find((c) => c.title === 'Upcoming resets')!.lines.map(text).join('\n');
+    expect(resets).toMatch(/fast pace, out in ~\dh/);
+    const provider = view.cards.find((c) => c.title === 'a')!.lines.map(text).join('\n');
+    expect(provider).toContain('↑ fast +27 pts/h');
+  });
+
+  test('the provider tab shows the pace and weighs the plan against past periods', () => {
+    const week = 7 * DAY;
+    const history = [0, 1, 2].flatMap((n) => [0, 3, 6.9].map((d) => ({
+      t: NOW - (3 - n) * week + d * DAY, p: 'a', l: 'Weekly', v: n === 2 ? d / 20 : (d / 6.9) * 0.2,
+    })));
+    const view = providerView(state('a', [weekly(40, 3)]), history, WINDOWS[1]!, OPTIONS, 60);
+    const fit = view.cards.find((c) => c.title === 'Plan fit')!;
+
+    expect(text(fit.subtitle)).toContain('last 21d · Pro');
+    expect(fit.lines.map(text).join('\n')).toContain('ran out 0/2');
+    expect(fit.lines.map(text).join('\n')).toContain('Weekly peaked at 20% · a plan with 1/2 of the limit would still fit');
+  });
+});
+
+describe('footer mode', () => {
+  test('logs resets, limits crossed and quotas already used up', () => {
+    const snap = (lines: ProgressLine[]) => ({ providerId: 'a', displayName: 'Claude', plan: null, warning: null, lines });
+    expect(snapshotEvents('Claude', null, snap([weekly(100, 1), { ...weekly(40, 1), label: 'Session' }])).map(text))
+      .toEqual([expect.stringMatching(/^✕ Claude Weekly is used up · resets /)]);
+    const events = snapshotEvents('Claude', snap([weekly(78, 1), { ...weekly(90, 1), label: 'Session' }]),
+      snap([weekly(82, 1), { ...weekly(3, 1), label: 'Session' }])).map(text);
+    expect(events[0]).toMatch(/^▲ Claude Weekly passed 80% · resets /);
+    expect(events[1]).toBe('↻ Claude Session reset · was 90%, now 3%');
+  });
+
+  test('one row per provider under the recommendation, cut to the width', () => {
+    const view = footerView([state('a', [weekly(20, 3)]), state('b', [weekly(70, 3)], 'auth')], [], OPTIONS, 80);
+    expect(view.lines).toHaveLength(3);
+    expect(text(view.lines[0]!)).toMatch(/^◆ Use next {2}● a Weekly · ~\d+% would expire · resets in 3d$/);
+    // every row leads with a logo slot for its provider
+    expect(view.lines.map((line) => line.find((span) => span.icon)?.icon)).toEqual(['a', 'a', 'b']);
+    expect(text(view.lines[2]!)).toContain('! stale');
+    expect(view.focus?.key).toBe('a\nWeekly');
+    expect(text(view.lines[1]!)).toContain('⟳ 3d');
+    // room for the logo's extra cell
+    for (const line of view.lines) expect(text(line).length).toBeLessThanOrEqual(79);
   });
 });

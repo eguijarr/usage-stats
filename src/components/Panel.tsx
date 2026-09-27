@@ -181,7 +181,7 @@ function SpanView({ span }: { span: Span }) {
   );
 }
 
-function LineView({ line, wrap = false }: { line: Line; wrap?: boolean }) {
+export function LineView({ line, wrap = false }: { line: Line; wrap?: boolean }) {
   const iconIdx = line.findIndex((span) => span.icon !== undefined);
   if (iconIdx === -1) {
     return (

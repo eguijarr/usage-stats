@@ -1,3 +1,4 @@
+import { activeMs, activeUntil, slotOf, type ActivityProfile, type RecentPace } from './pace';
 import type { ProgressLine } from './providers/types';
 
 /**
@@ -92,8 +93,12 @@ export type Forecast =
  * nothing is forecast before 5% of it passed. The rate belongs to the
  * observation time, not the UI clock: between polls only the countdown
  * changes, never the projected total.
+ *
+ * With an activity profile the rate is spread over the user's usual
+ * hours instead of the clock: a weekly quota whose remaining days are
+ * mostly nights and a weekend will see less use than its average says.
  */
-export function forecastOf(line: ProgressLine, now: number, observedAt = now): Forecast | null {
+export function forecastOf(line: ProgressLine, now: number, observedAt = now, profile: ActivityProfile | null = null): Forecast | null {
   if (!Number.isFinite(now) || !Number.isFinite(observedAt) || !Number.isFinite(line.used) || line.used < 0 ||
     !Number.isFinite(line.limit) || line.limit <= 0) return null;
   if (line.resetsAt !== null && !(Date.parse(line.resetsAt) > now)) return null;
@@ -112,6 +117,23 @@ export function forecastOf(line: ProgressLine, now: number, observedAt = now): F
     return null;
   }
 
+  if (profile !== null && line.resetsAt !== null) {
+    const reset = Date.parse(line.resetsAt);
+    const past = activeMs(profile, reset - line.periodDurationMs, sampledAt);
+
+    // a period that so far fell on hours the profile calls idle has no usable rate
+    if (past >= 0.01 * line.periodDurationMs) {
+      const projected = (used * (past + activeMs(profile, sampledAt, reset))) / past;
+
+      if (projected <= 1) {
+        return { kind: 'atReset', fraction: projected };
+      }
+
+      const runsOutAt = activeUntil(profile, sampledAt, ((1 - used) * past) / used, reset);
+      return { kind: 'runsOut', inMs: Math.max(0, runsOutAt - now) };
+    }
+  }
+
   const projected = used / elapsed;
 
   if (projected <= 1) {
@@ -121,6 +143,48 @@ export function forecastOf(line: ProgressLine, now: number, observedAt = now): F
   const elapsedMs = elapsed * line.periodDurationMs;
 
   return { kind: 'runsOut', inMs: Math.max(0, sampledAt + ((1 - used) * elapsedMs) / used - now) };
+}
+
+export interface FastBurn {
+  inMs: number;
+  perHour: number;
+}
+
+/**
+ * Flags a burst the period average hides: at the last hour's pace the
+ * quota would run out before its reset. Nothing is flagged when the
+ * average forecast already tells about as much.
+ *
+ * With an activity profile the pace only continues through the user's
+ * usual hours, not around the clock: a busy afternoon on a weekly quota
+ * lasts as many afternoons as the budget allows. The hour being measured
+ * counts as at least an average one, since the user is working in it.
+ */
+export function fastBurnOf(
+  line: ProgressLine,
+  pace: RecentPace | null,
+  now: number,
+  observedAt: number,
+  forecast: Forecast | null,
+  profile: ActivityProfile | null = null,
+): FastBurn | null {
+  if (pace === null || !(pace.perHour > 0) || line.resetsAt === null || forecast?.kind === 'exhausted') return null;
+
+  const used = fraction(line);
+  if (used >= 1) return null;
+
+  const sampledAt = Math.min(now, observedAt);
+  const reset = Date.parse(line.resetsAt);
+  const hoursLeft = (1 - used) / pace.perHour;
+  const outAt = profile === null
+    ? sampledAt + hoursLeft * 3600_000
+    : activeUntil(profile, sampledAt, hoursLeft * 3600_000 * Math.max(1, profile.factors[slotOf(new Date(sampledAt))]!), reset);
+  if (!(outAt < reset)) return null;
+
+  const inMs = Math.max(0, outAt - now);
+  if (forecast?.kind === 'runsOut' && forecast.inMs <= 1.5 * inMs) return null;
+
+  return { inMs, perHour: pace.perHour };
 }
 
 /**
@@ -173,8 +237,8 @@ export function resetGroupOf(line: ProgressLine): ResetGroup {
  * would be left. Missing or early-period forecasts stay unknown; the
  * currently unused share is not a prediction of what will remain.
  */
-export function expiringShare(line: ProgressLine, now: number, observedAt = now): number | null {
-  const forecast = forecastOf(line, now, observedAt);
+export function expiringShare(line: ProgressLine, now: number, observedAt = now, profile: ActivityProfile | null = null): number | null {
+  const forecast = forecastOf(line, now, observedAt, profile);
 
   if (forecast === null) {
     return null;

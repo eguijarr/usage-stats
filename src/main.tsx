@@ -2,6 +2,7 @@ import { createCliRenderer } from '@opentui/core';
 import { createRoot } from '@opentui/react';
 import { parseArgs } from 'node:util';
 import { App } from './App';
+import { FooterApp, footerHeight } from './FooterApp';
 import { setIconMode, type IconMode } from './components/ProviderIcon';
 import { loadHistory } from './history';
 import { publicErrorMessage } from './privacy';
@@ -21,12 +22,15 @@ Options:
                             (default ${DEFAULT_PROVIDERS.join(',')})
       --icons <mode>        Vendor logos: auto (Kitty/Sixel terminals), always, off
                             (default auto; the colored dot is the fallback)
+      --footer              Pin a few live rows under the shell's scrollback
+                            and log resets, limits and bursts into it
       --json                Probe once, print JSON to stdout, and exit
       --diagnose            Report the terminal's graphics support and exit
   -h, --help                Show this help
 
 Environment:
   USAGE_STATS_INTERVAL, USAGE_STATS_PROVIDERS   defaults for the flags above
+  USAGE_STATS_HISTORY_DAYS   Days of local history to keep (default 62, 7-400)
   USAGE_STATS_WINDOWS_HOME   Windows profile to search from WSL (auto-detected)
   CLAUDE_CONFIG_DIR, CODEX_HOME, CURSOR_STATE_DB   credential location overrides
 
@@ -38,6 +42,7 @@ async function main(): Promise<void> {
       interval: { type: 'string', short: 'i' },
       providers: { type: 'string', short: 'p' },
       json: { type: 'boolean' },
+      footer: { type: 'boolean' },
       icons: { type: 'string' },
       diagnose: { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
@@ -99,6 +104,8 @@ async function main(): Promise<void> {
   const renderer = await createCliRenderer({
     exitOnCtrlC: true,
     exitSignals: ['SIGINT', 'SIGTERM', 'SIGQUIT', 'SIGABRT', 'SIGHUP'],
+    // the footer leaves the mouse wheel to the terminal, to scroll the log above it
+    ...(values.footer ? { screenMode: 'split-footer' as const, footerHeight: footerHeight(providers.length), useMouse: false } : {}),
   });
 
   const quit = () => {
@@ -108,6 +115,13 @@ async function main(): Promise<void> {
 
   for (const signal of ['SIGTERM', 'SIGHUP'] as const) {
     process.on(signal, quit);
+  }
+
+  if (values.footer) {
+    createRoot(renderer).render(
+      <FooterApp providers={providers} initialInterval={interval} initialHistory={history} onQuit={quit} />,
+    );
+    return;
   }
 
   createRoot(renderer).render(

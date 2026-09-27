@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { loadHistory, recordSnapshot } from './history';
+import { compact, loadHistory, recordSnapshot, retentionMs } from './history';
 import { progress, type ProviderSnapshot } from './providers/types';
 import { writeFileAtomic } from './providers/env';
 
@@ -36,7 +36,7 @@ describe('private local storage', () => {
     const now = Date.now();
     writeFileSync(file, [
       { t: now, p: 'codex', l: 'contact person@example.invalid', v: 0.14, refresh_token: 'private-test-value' },
-      { t: now - 15 * 86400_000, p: 'codex', l: 'Weekly', v: 0.3 },
+      { t: now - 70 * 86400_000, p: 'codex', l: 'Weekly', v: 0.3 },
       { t: now, p: 'person@example.invalid', l: 'Weekly', v: 0.3 },
     ].map((sample) => JSON.stringify(sample)).join('\n') + '\nbroken row\n');
     chmodSync(file, 0o644);
@@ -85,5 +85,27 @@ describe('private local storage', () => {
     expect(readdirSync(dir)).toEqual(['auth.json']);
     expect(() => writeFileAtomic(dir, 'private-test-value')).toThrow();
     expect(readdirSync(dir)).toEqual(['auth.json']);
+  });
+});
+
+describe('long history', () => {
+  test('keeps two months by default, adjustable from a week to about a year', () => {
+    expect(retentionMs({})).toBe(62 * 86400_000);
+    expect(retentionMs({ USAGE_STATS_HISTORY_DAYS: '120' })).toBe(120 * 86400_000);
+    expect(retentionMs({ USAGE_STATS_HISTORY_DAYS: '1' })).toBe(7 * 86400_000);
+    expect(retentionMs({ USAGE_STATS_HISTORY_DAYS: 'lots' })).toBe(62 * 86400_000);
+  });
+
+  test('compacts old readings to the highest per half hour, keeping recent ones intact', () => {
+    const minute = 60_000;
+    const base = Date.parse('2026-09-01T10:00:00Z');
+    const old = [0, 5, 10, 25].map((m, i) => ({ t: base + m * minute, p: 'codex', l: 'Weekly', v: [0.5, 0.9, 0.1, 0.12][i]! }));
+    const recent = [{ t: base + 3 * 86400_000, p: 'codex', l: 'Weekly', v: 0.2 }, { t: base + 3 * 86400_000 + minute, p: 'codex', l: 'Weekly', v: 0.21 }];
+
+    // the peak before the reset survives, at the bucket's last time, so the drop still shows next
+    expect(compact([...old, ...recent], base + 2 * 86400_000)).toEqual([
+      { t: base + 25 * minute, p: 'codex', l: 'Weekly', v: 0.9 },
+      ...recent,
+    ]);
   });
 });

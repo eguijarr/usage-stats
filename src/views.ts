@@ -2,7 +2,10 @@ import * as asciichart from 'asciichart';
 import {
   elapsedFraction,
   expiringShare,
+  fastBurnOf,
+  type FastBurn,
   FOCUS_MIN_EXPIRING,
+  type Forecast,
   forecastOf,
   formatDuration,
   formatPercent,
@@ -15,6 +18,8 @@ import {
 } from './format';
 import type { Sample } from './history';
 import { card, lineWidth, type Card, type Line, type Span } from './model';
+import { recentPace, type ActivityProfile } from './pace';
+import { planVerdict, quotaFit, type PlanVerdict } from './plan';
 import type { ProgressLine, ProviderSnapshot } from './providers/types';
 import { brand, levelColor, theme } from './theme';
 
@@ -40,6 +45,11 @@ export interface ViewOptions {
   now: number;
   staleAfterMs: number;
   terminalWidth?: number;
+  /**
+   * The user's usual hours, which forecasts follow once the history has
+   * taught them; null or missing keeps the same pace around the clock.
+   */
+  profile?: ActivityProfile | null;
 }
 
 export interface View {
@@ -119,6 +129,25 @@ function windowSamples(history: Sample[], providerId: string, label: string, sta
 
 function progressLines(state: ProviderState): ProgressLine[] {
   return (state.snapshot?.lines ?? []).filter((line): line is ProgressLine => line.type === 'progress');
+}
+
+function forecastFor(line: ProgressLine, state: ProviderState, options: ViewOptions): Forecast | null {
+  return forecastOf(line, options.now, state.lastOk ?? options.now, options.profile ?? null);
+}
+
+function fastBurnFor(line: ProgressLine, state: ProviderState, history: Sample[], options: ViewOptions): FastBurn | null {
+  return fastBurnOf(line, recentPace(history, state.id, line.label, options.now), options.now,
+    state.lastOk ?? options.now, forecastFor(line, state, options), options.profile ?? null);
+}
+
+function paceText(perHour: number): string {
+  const points = perHour * 100;
+  return `+${points < 10 ? points.toFixed(1) : Math.round(points)} pts/h`;
+}
+
+/** A burst, in the words of the forecasts next to it. */
+function fastSpan(fast: FastBurn): Span {
+  return { text: `↑ fast ${paceText(fast.perHour)}, out in ~${formatDuration(fast.inMs)} at this pace`, fg: theme.error };
 }
 
 export type BarStyle = 'scattered' | 'subtle' | 'contrast' | 'solid';
@@ -300,9 +329,7 @@ function barColor(used: number, highlight: boolean): string {
  * reset otherwise. Dollar and count quotas without a period show their
  * amounts instead.
  */
-function forecastSpan(line: ProgressLine, now: number, observedAt = now): Span {
-  const forecast = forecastOf(line, now, observedAt);
-
+function forecastSpan(line: ProgressLine, forecast: Forecast | null): Span {
   if (forecast?.kind === 'exhausted') {
     return { text: '← exhausted', fg: theme.error };
   }
@@ -459,11 +486,12 @@ const RETRY_HINT: Span = { text: '  (r retries)', fg: theme.dim };
 function quotaRows(
   state: ProviderState,
   history: Sample[],
-  now: number,
+  options: ViewOptions,
   availableWidth: number,
   sharedLabelWidth: number,
   wide = false,
 ): Line[] {
+  const { now } = options;
   const lines = progressLines(state);
   const labelWidth = Math.min(sharedLabelWidth, Math.max(8, Math.floor(availableWidth / 3)));
   const showReset = availableWidth >= labelWidth + 1 + 16 + 6 + 13;
@@ -492,8 +520,11 @@ function quotaRows(
   );
   const resetWidth = Math.max(0, ...resetLabels.map((label) => label.length));
   for (const [i, line] of lines.entries()) {
-    const forecast = forecastSpan(line, now, state.lastOk ?? now);
-    const atRisk = ['runsOut', 'exhausted'].includes(forecastOf(line, now, state.lastOk ?? now)?.kind ?? '');
+    const outlook = forecastFor(line, state, options);
+    const forecast = forecastSpan(line, outlook);
+    const atRisk = ['runsOut', 'exhausted'].includes(outlook?.kind ?? '');
+    const fast = fastBurnFor(line, state, history, options);
+    const pace = wide && fast === null ? recentPace(history, state.id, line.label, now) : null;
     const parts: Line = [];
 
     if (wide) {
@@ -507,7 +538,12 @@ function quotaRows(
       if (elapsed !== null) parts.push({ text: `${padStart(formatPercent(elapsed), 4)} elapsed  `, fg: theme.dim });
     }
     if (wide || atRisk) parts.push(forecast);
-    if (line.format.kind !== 'percent' && (!wide || forecastOf(line, now, state.lastOk ?? now) !== null)) {
+    if (fast !== null) {
+      parts.push({ text: parts.length > 0 ? '  ' : '' }, fastSpan(fast));
+    } else if (pace !== null && pace.perHour > 0) {
+      parts.push({ text: `  ${paceText(pace.perHour)} last 1h`, fg: theme.dim });
+    }
+    if (line.format.kind !== 'percent' && (!wide || outlook !== null)) {
       parts.push({ text: `  ${formatUsed(line)}`, fg: theme.muted });
     }
     if (parts.length > 0) {
@@ -548,15 +584,17 @@ export function overviewView(allStates: ProviderState[], history: Sample[], opti
   const failed = states.filter((state) => state.error !== null).length;
 
   const all = states.flatMap((state) => progressLines(state).map((line) => ({ state, line })));
-  const resets = all
+  const resets: ResetEntry[] = all
     .filter(({ line }) => !line.auxiliary && Number.isFinite(line.used) && line.used >= 0 &&
       Number.isFinite(line.limit) && line.limit > 0 && line.resetsAt !== null && Date.parse(line.resetsAt) > now)
-    .sort((a, b) => Date.parse(a.line.resetsAt!) - Date.parse(b.line.resetsAt!));
+    .sort((a, b) => Date.parse(a.line.resetsAt!) - Date.parse(b.line.resetsAt!))
+    .map(({ state, line }) => ({ state, line, fast: fastBurnFor(line, state, history, options) }));
   const atRisk = resets.filter(({ state, line }) => {
     if (line.auxiliary || resetDataNotice(state, options) !== null) return false;
-    const kind = forecastOf(line, now, state.lastOk ?? now)?.kind;
+    const kind = forecastFor(line, state, options)?.kind;
     return kind === 'runsOut' || kind === 'exhausted';
   });
+  const burning = resets.filter((entry) => entry.fast !== null && resetDataNotice(entry.state, options) === null);
 
   const strip: Line[] = [
     [
@@ -578,6 +616,12 @@ export function overviewView(allStates: ProviderState[], history: Sample[], opti
           { text: atRisk.length === 1 ? ' quota at risk' : ' quotas at risk', fg: theme.muted },
         ]
       : [],
+    burning.length > 0
+      ? [
+          { text: String(burning.length), fg: theme.error, bold: true },
+          { text: ' burning fast', fg: theme.muted },
+        ]
+      : [],
   ];
 
   const panelWidth = Math.max(20, (options.terminalWidth ?? 140) - 4);
@@ -591,7 +635,7 @@ export function overviewView(allStates: ProviderState[], history: Sample[], opti
   const columnWidth = states.length > 1 && panelWidth >= 116 ? Math.floor((panelWidth - 4) / 2) : panelWidth;
   const labelWidth = Math.min(MAX_LABEL, Math.max(8, ...all.map(({ line }) => line.label.length)));
   for (const state of states) {
-    const rows = quotaRows(state, history, now, columnWidth, labelWidth);
+    const rows = quotaRows(state, history, options, columnWidth, labelWidth);
     for (const line of state.snapshot?.lines ?? []) {
       if (line.type === 'text' || line.type === 'badge') {
         rows.push(...annotationRows([
@@ -602,10 +646,17 @@ export function overviewView(allStates: ProviderState[], history: Sample[], opti
       }
     }
     if (state.snapshot?.warning) rows.push(...annotationRows([{ text: state.snapshot.warning, fg: theme.warn }], columnWidth));
+    // only a verdict worth acting on reaches the overview, the rest stays on the tab
+    const verdict = verdictOf(state, history);
+    if (verdict?.kind === 'upgrade' || verdict?.kind === 'downsize') {
+      rows.push(...annotationRows([{ text: 'plan  ', fg: theme.muted }, verdictSpan(verdict, history, now)], columnWidth));
+    }
     cards.push(card(displayName(state), [
       { text: '% used · ', fg: theme.muted }, ...statusSubtitle(state, options),
     ], rows, false, brandMark(state.id), state.id));
   }
+
+  cards.push(hoursCard(options, panelWidth));
 
   return { strip, heading: null, headline: null, cards, empty: null };
 }
@@ -617,14 +668,14 @@ const RESET_GROUPS: { key: ResetGroup; title: string }[] = [
   { key: 'other', title: 'Other resets' },
 ];
 
-type ResetEntry = { state: ProviderState; line: ProgressLine };
+type ResetEntry = { state: ProviderState; line: ProgressLine; fast: FastBurn | null };
 
 /**
  * Only declared dependencies can constrain a quota. Sibling model pools
  * are independent even when they have the same provider and reset date.
  */
-function blockerOf(entry: ResetEntry, now: number): { line: ProgressLine; usedUp: boolean; inMs: number } | null {
-  const observedAt = entry.state.lastOk ?? now;
+function blockerOf(entry: ResetEntry, options: ViewOptions): { line: ProgressLine; usedUp: boolean; inMs: number } | null {
+  const { now } = options;
   const others = progressLines(entry.state).filter((line) =>
     entry.line.dependsOn?.includes(line.label) && line !== entry.line && line.limit > 0 &&
     (line.resetsAt === null || Date.parse(line.resetsAt) > now),
@@ -640,7 +691,7 @@ function blockerOf(entry: ResetEntry, now: number): { line: ProgressLine; usedUp
 
   const reset = Date.parse(entry.line.resetsAt!);
   const capping = others.flatMap((line) => {
-    const forecast = forecastOf(line, now, observedAt);
+    const forecast = forecastFor(line, entry.state, options);
     // A shorter window can refill several times before this quota resets.
     return forecast?.kind === 'runsOut' && now + forecast.inMs < reset &&
       line.resetsAt !== null && Date.parse(line.resetsAt) >= reset
@@ -656,12 +707,12 @@ function blockerOf(entry: ResetEntry, now: number): { line: ProgressLine; usedUp
  * reset at this pace, all of it gets used anyway, whatever this window
  * leaves behind, so steering work here recovers nothing.
  */
-function parentRunsOut(entry: ResetEntry, now: number): boolean {
+function parentRunsOut(entry: ResetEntry, options: ViewOptions): boolean {
   const reset = Date.parse(entry.line.resetsAt!);
 
   return progressLines(entry.state).some((line) =>
     entry.line.dependsOn?.includes(line.label) && line !== entry.line && line.resetsAt !== null &&
-    Date.parse(line.resetsAt) >= reset && forecastOf(line, now, entry.state.lastOk ?? now)?.kind === 'runsOut',
+    Date.parse(line.resetsAt) >= reset && forecastFor(line, entry.state, options)?.kind === 'runsOut',
   );
 }
 
@@ -687,9 +738,9 @@ function expiringText(entry: ResetEntry, options: ViewOptions): Span {
   const { now } = options;
   const notice = resetDataNotice(entry.state, options);
   if (notice !== null) return { text: notice, fg: theme.warn };
-  const forecast = forecastOf(entry.line, now, entry.state.lastOk ?? now);
-  const expiring = expiringShare(entry.line, now, entry.state.lastOk ?? now);
-  const blocker = blockerOf(entry, now);
+  const forecast = forecastFor(entry.line, entry.state, options);
+  const expiring = expiringShare(entry.line, now, entry.state.lastOk ?? now, options.profile ?? null);
+  const blocker = blockerOf(entry, options);
 
   if (forecast?.kind === 'exhausted') {
     return { text: 'fully used', fg: theme.error };
@@ -707,6 +758,10 @@ function expiringText(entry: ResetEntry, options: ViewOptions): Span {
     return { text: forecast.inMs > 0 ? `runs out in ~${formatDuration(forecast.inMs)}` : 'may be exhausted · r refresh', fg: theme.error };
   }
 
+  if (entry.fast !== null) {
+    return { text: `fast pace, out in ~${formatDuration(entry.fast.inMs)}`, fg: theme.error };
+  }
+
   return expiring === null
     ? { text: 'no forecast yet', fg: theme.muted }
     : { text: `~${formatPercent(1 - expiring)} used at reset`, fg: theme.muted };
@@ -717,10 +772,11 @@ function expiringText(entry: ResetEntry, options: ViewOptions): Span {
  * that would still lose a real share of its credits.
  */
 function focusOf(entries: ResetEntry[], options: ViewOptions): ResetEntry | null {
+  // a quota burning fast right now will not be left over, whatever its average says
   return entries.find((entry) =>
-    resetDataNotice(entry.state, options) === null && blockerOf(entry, options.now) === null &&
-    !parentRunsOut(entry, options.now) &&
-    (expiringShare(entry.line, options.now, entry.state.lastOk ?? options.now) ?? 0) >= FOCUS_MIN_EXPIRING,
+    resetDataNotice(entry.state, options) === null && blockerOf(entry, options) === null &&
+    !parentRunsOut(entry, options) && entry.fast === null &&
+    (expiringShare(entry.line, options.now, entry.state.lastOk ?? options.now, options.profile ?? null) ?? 0) >= FOCUS_MIN_EXPIRING,
   ) ?? null;
 }
 
@@ -743,7 +799,7 @@ function recommendationCard(entries: ResetEntry[], focus: ResetEntry | null, opt
   if (gap >= 2) last.push({ text: ' '.repeat(gap) }, { text: remaining, fg: theme.accent, bold: true });
   else name.push([{ text: remaining, fg: theme.accent, bold: true }]);
   const reason = annotationRows([{
-    text: `~${formatPercent(expiringShare(focus.line, options.now, focus.state.lastOk ?? options.now)!)} would expire unused`, fg: theme.muted,
+    text: `~${formatPercent(expiringShare(focus.line, options.now, focus.state.lastOk ?? options.now, options.profile ?? null)!)} would expire unused`, fg: theme.muted,
   }], width - 2);
   const lines = [...name, ...reason].map((row) => [
     { text: ' ', bg: theme.selectedBg },
@@ -757,9 +813,9 @@ function recommendationCard(entries: ResetEntry[], focus: ResetEntry | null, opt
 /** All quota bars represent current usage, matching the provider's Forecast. */
 function resetUsageColor(entry: ResetEntry, options: ViewOptions, isFocus: boolean): string {
   if (resetDataNotice(entry.state, options) !== null) return theme.dim;
-  if (blockerOf(entry, options.now)?.usedUp) return theme.dim;
-  const forecast = forecastOf(entry.line, options.now, entry.state.lastOk ?? options.now);
-  if (forecast?.kind === 'exhausted' || forecast?.kind === 'runsOut' || fraction(entry.line) >= 0.85) return theme.error;
+  if (blockerOf(entry, options)?.usedUp) return theme.dim;
+  const forecast = forecastFor(entry.line, entry.state, options);
+  if (forecast?.kind === 'exhausted' || forecast?.kind === 'runsOut' || entry.fast !== null || fraction(entry.line) >= 0.85) return theme.error;
   return isFocus ? theme.accent : theme.chartBar;
 }
 
@@ -854,7 +910,10 @@ function resetsCard(resets: ResetEntry[], focus: ResetEntry | null, options: Vie
     if (!compact) lines.push(...axisRows(nameWidth + 3, barWidth));
   }
 
-  lines.push([], ...annotationRows([{ text: 'Forecasts assume the same average pace.', fg: theme.dim }], width));
+  const pace = options.profile
+    ? `Forecasts follow your usual hours, learned from ${options.profile.days} days of history.`
+    : 'Forecasts assume the same average pace around the clock until a few days of history teach your usual hours.';
+  lines.push([], ...annotationRows([{ text: pace, fg: theme.dim }], width));
   return card('Upcoming resets', [{ text: compact ? '% used · resets by group' : '% used · soonest in each group', fg: theme.muted }], lines, true);
 }
 
@@ -907,7 +966,7 @@ export function providerView(
         { text: `tightest ${primary.label} `, fg: theme.muted },
         { text: formatPercent(fraction(primary)), fg: levelColor(fraction(primary)), bold: true },
         { text: primary.resetsAt ? `  ${resetIn(primary, now)}  ` : '  ', fg: theme.muted },
-        forecastSpan(primary, now, state.lastOk ?? now),
+        forecastSpan(primary, forecastFor(primary, state, options)),
       ]
     : null;
 
@@ -919,11 +978,15 @@ export function providerView(
     { text: '% used · ', fg: theme.muted },
     { text: '▁▃▆', fg: theme.chartLine },
     { text: ' 24h', fg: theme.muted },
-  ], quotaRows(state, history, now, panelWidth, labelWidth, true), true));
+  ], quotaRows(state, history, options, panelWidth, labelWidth, true), true));
+
 
   for (const line of lines) {
     cards.push(trendCard(state.id, line, history, window, now, chartWidth));
   }
+
+  const fit = planFitCard(state, history, options, panelWidth);
+  if (fit !== null) cards.push(fit);
 
   const details: Line[] = [];
   const detailWidth = Math.max(
@@ -965,6 +1028,130 @@ export function providerView(
   }
 
   return { strip, heading: displayName(state), headingIcon: state.id, headline, cards, empty: null };
+}
+
+const DAY_MS = 24 * 3600_000;
+
+/**
+ * Quotas that tell whether the plan is the right size: the provider's own
+ * coding quotas with a known period.
+ */
+function fitsOf(state: ProviderState, history: Sample[]) {
+  return progressLines(state)
+    .filter((line) => !line.auxiliary && !line.detailOnly)
+    .flatMap((line) => quotaFit(history, state.id, line) ?? []);
+}
+
+/**
+ * The fit reads the whole history, so it is worked out once per history
+ * and provider state instead of on every one-second tick.
+ */
+const verdictCache = new WeakMap<Sample[], Map<string, PlanVerdict | null>>();
+
+function verdictOf(state: ProviderState, history: Sample[]): PlanVerdict | null {
+  if (state.snapshot === null) return null;
+  const key = [state.id, state.snapshot.plan, ...progressLines(state).map((line) => `${line.label}:${line.periodDurationMs}`)].join('\n');
+  let cached = verdictCache.get(history);
+  if (cached === undefined) verdictCache.set(history, (cached = new Map()));
+  if (!cached.has(key)) cached.set(key, planVerdict(state.id, state.snapshot.plan, fitsOf(state, history)));
+  return cached.get(key)!;
+}
+
+function historyDays(history: Sample[], now: number): number {
+  return history.length === 0 ? 0 : Math.max(1, Math.ceil((now - history[0]!.t) / DAY_MS));
+}
+
+function verdictSpan(verdict: PlanVerdict, history: Sample[], now: number): Span {
+  switch (verdict.kind) {
+    case 'learning':
+      return { text: `learning · ${verdict.seen} of ${verdict.needed} ${verdict.label} periods seen through to their reset`, fg: theme.dim };
+    case 'upgrade':
+      return verdict.days
+        ? { text: `ran out of ${verdict.label} on ${verdict.ranOut} ${verdict.ranOut === 1 ? 'day' : 'days'} in ${historyDays(history, now)}d · a bigger plan would keep you going`, fg: theme.error }
+        : { text: `ran out of ${verdict.label} in ${verdict.ranOut} of ${verdict.periods} periods · a bigger plan would keep you going`, fg: theme.error };
+    case 'downsize':
+      return {
+        text: `${verdict.label} peaked at ${formatPercent(verdict.maxPeak)} · ${verdict.plan ?? `a plan with 1/${verdict.ratio} of the limit`} would still fit`,
+        fg: theme.success,
+      };
+    case 'fits':
+      return { text: `${verdict.label} peaked at ${formatPercent(verdict.maxPeak)} and never ran out · the plan fits`, fg: theme.muted };
+  }
+}
+
+/**
+ * How full each quota got before its resets, over the whole history, and
+ * what that says about the size of the plan.
+ */
+function planFitCard(state: ProviderState, history: Sample[], options: ViewOptions, width: number): Card | null {
+  const fits = fitsOf(state, history);
+  const verdict = verdictOf(state, history);
+  if (fits.length === 0 || verdict === null) return null;
+
+  const labelWidth = Math.min(MAX_LABEL, Math.max(8, ...fits.map((fit) => fit.label.length)));
+  const barWidth = Math.max(8, Math.min(BAR_WIDTH, width - labelWidth - 40));
+  const rows: Line[] = fits.map((fit) => fit.periods === 0
+    ? [
+        { text: `${shortLabel(fit.label, labelWidth)} `, fg: theme.muted },
+        { text: 'no reset seen yet', fg: theme.dim },
+      ]
+    : [
+        { text: `${shortLabel(fit.label, labelWidth)} `, fg: theme.muted },
+        ...bar(fit.maxPeak, barWidth, fit.ranOut > 0 ? theme.error : theme.chartBar),
+        { text: padStart(formatPercent(fit.maxPeak), 6), fg: theme.text },
+        { text: `  median ${formatPercent(fit.medianPeak)}`, fg: theme.muted },
+        { text: `  ran out ${fit.ranOut}/${fit.periods}`, fg: fit.ranOut > 0 ? theme.error : theme.dim },
+      ]);
+
+  rows.push([], ...annotationRows([verdictSpan(verdict, history, options.now)], width));
+
+  return card('Plan fit', [
+    { text: `peak before each reset · last ${historyDays(history, options.now)}d`, fg: theme.muted },
+    ...(state.snapshot?.plan ? [{ text: ` · ${state.snapshot.plan}`, fg: theme.dim }] : []),
+  ], rows, true);
+}
+
+/**
+ * The learned profile as a heat strip, one cell pair per hour, so the
+ * forecasts' idea of "your hours" can be checked at a glance.
+ */
+function hoursCard(options: ViewOptions, width: number): Card {
+  const profile = options.profile ?? null;
+  const title = 'Your hours';
+
+  if (profile === null) {
+    return card(title, [{ text: 'activity by hour', fg: theme.muted }], annotationRows([
+      { text: 'Learning when you work: after 4 days of history, forecasts stop assuming the same pace around the clock.', fg: theme.dim },
+    ], Math.min(width, 60)));
+  }
+
+  const labelWidth = 9;
+  const cell = width >= labelWidth + 48 ? 2 : 1;
+  const heat = (factor: number): Span => {
+    const level = factor < 0.35 ? -1 : factor < 0.8 ? 0 : factor < 1.4 ? 1 : factor < 2.2 ? 2 : 3;
+    const color = level < 0 ? null : theme.heat[level]!;
+    return color === null ? { text: ' '.repeat(cell), bg: theme.chartBg } : { text: '░'.repeat(cell), fg: darkenBar(color, 0.65), bg: color };
+  };
+  const row = (name: string, offset: number): Line => [
+    { text: padEnd(name, labelWidth), fg: theme.muted },
+    ...merge(profile.factors.slice(offset, offset + 24).map(heat)),
+  ];
+  const axis = Array.from({ length: 24 * cell }, () => ' ');
+  for (const hour of [0, 6, 12, 18]) {
+    const label = String(hour);
+    for (let i = 0; i < label.length; i++) axis[hour * cell + i] = label[i]!;
+  }
+  const current = new Date(options.now);
+  const nowAt = current.getHours() * cell;
+  const marker = Array.from({ length: 24 * cell }, (_, i) => (i === nowAt ? '▲' : ' ')).join('').trimEnd();
+  const today = current.getDay() === 0 || current.getDay() === 6 ? 'weekends' : 'weekdays';
+
+  return card(title, [{ text: `activity by hour · ${profile.days} days learned`, fg: theme.muted }], [
+    row('weekdays', 0),
+    row('weekends', 24),
+    [{ text: ' '.repeat(labelWidth) + axis.join('').trimEnd(), fg: theme.dim }],
+    [{ text: ' '.repeat(labelWidth) + marker, fg: theme.accent }, { text: ` now (${today})`, fg: theme.dim }],
+  ]);
 }
 
 function barChartCard(
@@ -1099,4 +1286,139 @@ function trendCard(
   subtitle.push({ text: `  peak ${Math.round(peak)}%`, fg: theme.dim });
 
   return card(`Trend · ${line.label}`, subtitle, rows);
+}
+
+/**
+ * What the footer mode shows: a line for the recommendation and a line per
+ * provider, both led by the provider's logo where the terminal draws it,
+ * and the keys of the recommended and fast-burning quotas, which the
+ * footer compares between ticks to log changes to the scrollback.
+ */
+export interface FooterView {
+  lines: Line[];
+  focus: { key: string; text: Line } | null;
+  fast: { key: string; text: Line }[];
+}
+
+function entryKey(entry: { state: ProviderState; line: ProgressLine }): string {
+  return `${entry.state.id}\n${entry.line.label}`;
+}
+
+export function footerView(states: ProviderState[], history: Sample[], options: ViewOptions, width: number): FooterView {
+  const { now } = options;
+  const entries: ResetEntry[] = states
+    .flatMap((state) => progressLines(state).filter((line) => !line.detailOnly).map((line) => ({ state, line })))
+    .filter(({ line }) => !line.auxiliary && Number.isFinite(line.used) && line.used >= 0 &&
+      Number.isFinite(line.limit) && line.limit > 0 && line.resetsAt !== null && Date.parse(line.resetsAt) > now)
+    .sort((a, b) => Date.parse(a.line.resetsAt!) - Date.parse(b.line.resetsAt!))
+    .map(({ state, line }) => ({ state, line, fast: fastBurnFor(line, state, history, options) }));
+  const focus = focusOf(entries, options);
+  const fast = entries.filter((entry) => entry.fast !== null && resetDataNotice(entry.state, options) === null);
+
+  const lines: Line[] = [focus === null
+    ? [{ text: '◆ ', fg: theme.dim }, { text: 'no clear priority', fg: theme.muted }]
+    : [
+        { text: '◆ Use next  ', fg: theme.accent },
+        { text: '● ', fg: brandColor(focus.state.id), icon: focus.state.id },
+        { text: entryName(focus), fg: theme.text, bold: true },
+        { text: ` · ~${formatPercent(expiringShare(focus.line, now, focus.state.lastOk ?? now, options.profile ?? null)!)} would expire`, fg: theme.muted },
+        { text: ` · resets in ${formatDuration(Date.parse(focus.line.resetsAt!) - now)}`, fg: theme.accent },
+      ]];
+
+  const nameWidth = Math.min(16, Math.max(6, ...states.map((state) => displayName(state).length)));
+  // one label width for every row, so the bars line up in columns
+  const labelWidth = Math.min(12, Math.max(4, ...states.flatMap((state) => progressLines(state).map((line) => line.label.length))));
+  const resetWidth = Math.max(0, ...states.flatMap((state) => progressLines(state).map((line) => resetIn(line, now).length)));
+  for (const state of states) {
+    // a logo takes one cell more than the dot, which the width leaves room for
+    const row: Line = [
+      { text: '● ', fg: brandColor(state.id), icon: state.id },
+      { text: padEnd(displayName(state), nameWidth), fg: theme.text },
+    ];
+    const quotas = progressLines(state).filter((line) => !line.auxiliary && !line.detailOnly);
+
+    if (state.snapshot === null) {
+      row.push(state.error !== null
+        ? { text: `  ✕ ${state.error}`, fg: theme.error }
+        : { text: '  ◌ probing…', fg: theme.muted });
+    } else if (state.error !== null || resetDataNotice(state, options) === 'stale data · r refresh') {
+      row.push({ text: '  ! stale', fg: theme.warn });
+    }
+
+    for (const line of state.snapshot === null ? [] : quotas) {
+      const used = fraction(line);
+      const forecast = forecastFor(line, state, options);
+      const burst = fastBurnFor(line, state, history, options);
+      const alarm = burst !== null || forecast?.kind === 'runsOut' || forecast?.kind === 'exhausted';
+      const segment: Line = [
+        { text: `  ${shortLabel(line.label, labelWidth)} `, fg: theme.muted },
+        ...bar(used, 8, alarm ? theme.error : barColor(used, false)),
+        { text: padStart(formatPercent(used), 5), fg: theme.text },
+        { text: ` ${resetIn(line, now).padEnd(resetWidth)} `, fg: theme.dim },
+        { text: burst !== null ? '↑' : ' ', fg: theme.error },
+      ];
+      if (lineWidth(row) + 1 + lineWidth(segment) > width) {
+        row.push({ text: ' …', fg: theme.dim });
+        break;
+      }
+      row.push(...segment);
+    }
+    lines.push(merge(row));
+  }
+
+  return {
+    lines,
+    focus: focus === null ? null : { key: entryKey(focus), text: [
+      { text: '◆ Use next ', fg: theme.accent },
+      { text: entryName(focus), fg: theme.text, bold: true },
+      { text: ` · ~${formatPercent(expiringShare(focus.line, now, focus.state.lastOk ?? now, options.profile ?? null)!)} would expire in ${formatDuration(Date.parse(focus.line.resetsAt!) - now)}`, fg: theme.muted },
+    ] },
+    fast: fast.map((entry) => ({ key: entryKey(entry), text: [
+      { text: entryName(entry), fg: theme.text },
+      { text: ' ' },
+      fastSpan(entry.fast!),
+    ] })),
+  };
+}
+
+/**
+ * Changes between two snapshots of a provider worth a line in the
+ * footer's log: resets, and quotas crossing half, 80%, or their limit.
+ */
+export function snapshotEvents(name: string, previous: ProviderSnapshot | null, next: ProviderSnapshot): Line[] {
+  const events: Line[] = [];
+  const before = new Map((previous?.lines ?? []).flatMap((line) => (line.type === 'progress' ? [[line.label, fraction(line)] as const] : [])));
+
+  for (const line of next.lines) {
+    if (line.type !== 'progress' || line.auxiliary || line.detailOnly) continue;
+    const used = fraction(line);
+    const was = before.get(line.label);
+    const quota = line.label.startsWith(name) ? line.label : `${name} ${line.label}`;
+
+    if (was === undefined) {
+      // the first reading only reports what already needs attention
+      if (previous === null && used >= 1) {
+        events.push([{ text: `✕ ${quota} is used up`, fg: theme.error }, ...resetNote(line)]);
+      }
+      continue;
+    }
+
+    if (used < was - 0.02 && was >= 0.05) {
+      events.push([{ text: `↻ ${quota} reset`, fg: theme.success }, { text: ` · was ${formatPercent(was)}, now ${formatPercent(used)}`, fg: theme.muted }]);
+      continue;
+    }
+
+    const crossed = [1, 0.8, 0.5].find((mark) => was < mark && used >= mark);
+    if (crossed === 1) {
+      events.push([{ text: `✕ ${quota} ran out`, fg: theme.error }, ...resetNote(line)]);
+    } else if (crossed !== undefined) {
+      events.push([{ text: `▲ ${quota} passed ${formatPercent(crossed)}`, fg: crossed >= 0.8 ? theme.accent : theme.text }, ...resetNote(line)]);
+    }
+  }
+
+  return events;
+}
+
+function resetNote(line: ProgressLine): Line {
+  return line.resetsAt === null ? [] : [{ text: ` · resets ${resetAt(line, true)}`, fg: theme.muted }];
 }

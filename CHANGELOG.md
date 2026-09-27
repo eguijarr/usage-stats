@@ -7,6 +7,24 @@ El formato sigue [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y e
 
 ## [Unreleased]
 
+### Añadido
+
+- **Previsiones con tu horario**: con al menos 4 días de histórico se aprende la intensidad de uso por hora
+  del día, en laborables y en fin de semana, y los pronósticos, **Use next** y **Upcoming resets** la
+  integran en lugar de suponer el mismo ritmo las 24 horas. La tarjeta **Your hours** del Overview la
+  muestra como un mapa de calor.
+- **Consumo rápido** (`↑ fast`): el ritmo de la última hora se compara con la media del periodo y avisa
+  cuando, a ese ritmo y en tus horas habituales, la cuota se agotaría antes del reinicio. El Overview
+  cuenta las cuotas en ráfaga, **Use next** deja de recomendarlas y la pestaña de cada proveedor muestra el
+  ritmo reciente en puntos por hora.
+- **Plan fit** en la pestaña de cada proveedor: pico y mediana antes de cada reinicio, periodos agotados y un
+  veredicto (plan corto, plan sobrado o encaja). En Claude nombra el nivel inferior que seguiría cabiendo;
+  el Overview solo muestra los veredictos accionables.
+- **Modo `--footer`**: filas en vivo fijadas bajo el scrollback de la terminal (modo `split-footer` de
+  OpenTUI), con los logos de los proveedores en terminales Kitty o Sixel como en el panel completo, y un registro con hora de reinicios, cuotas que pasan del 50 %, 80 % o se agotan, ráfagas y
+  cambios de **Use next**.
+- `USAGE_STATS_HISTORY_DAYS` para elegir los días de histórico.
+
 ### Corregido
 
 - **Use next** ya no recomienda una sesión o cuota diaria cuando la cuota semanal de la que descuenta se
@@ -14,11 +32,14 @@ El formato sigue [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y e
   la cuota que sí caducaría sin usarse.
 - **Devin**: una cuota diaria agotada ya no desaparece. La API omite el 0 % restante (proto3), igual que
   ya se trataba en la semanal.
+- **Modo footer (`--footer`)**: los iconos de proveedor (Sixel) ahora calculan el tamaño de celda usando las dimensiones completas de la terminal en lugar de la altura del marco del footer, se dibujan en su fila real tras el scrollback (`renderOffset`) y se repintan tras registrar eventos.
 
 ### Cambiado
 
 - El histórico guarda una lectura repetida solo cada 5 minutos (antes, una por sondeo) y adelgaza al
   arrancar los ficheros existentes; las gráficas y sparklines se dibujan igual con ~90 % menos filas.
+- El histórico se conserva 62 días en lugar de 14, para el Plan fit y el perfil horario. Las lecturas de más
+  de 48 horas se compactan a la más alta de cada media hora, que conserva picos y agotamientos.
 
 ## [0.1.0] - 2026-09-26
 
