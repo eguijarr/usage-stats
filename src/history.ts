@@ -21,6 +21,32 @@ export interface Sample {
  */
 const RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
 
+/**
+ * A reading equal to the last stored one for its quota is only kept once
+ * this much time passed, so a steady quota costs a row every few minutes
+ * instead of one per poll. The charts carry the previous value forward,
+ * so skipping repeats draws the same lines.
+ */
+const HEARTBEAT_MS = 5 * 60 * 1000;
+
+type LastStored = Map<string, { t: number; v: number }>;
+
+const lastStored = new Map<string, LastStored>();
+
+function thin(samples: Sample[], last: LastStored): Sample[] {
+  return samples.filter((sample) => {
+    const key = `${sample.p}\n${sample.l}`;
+    const previous = last.get(key);
+
+    if (previous && previous.v === sample.v && sample.t - previous.t < HEARTBEAT_MS) {
+      return false;
+    }
+
+    last.set(key, { t: sample.t, v: sample.v });
+    return true;
+  });
+}
+
 export const HISTORY_FILE = join(
   process.env.XDG_DATA_HOME ?? join(homedir(), '.local', 'share'),
   'usage-stats',
@@ -59,9 +85,14 @@ export function loadHistory(file = HISTORY_FILE): Sample[] {
   } finally {
     closeSync(fd);
   }
-  writePrivateHistory(file, samples, false);
+  // Two running instances can interleave their appends; the charts expect time order.
+  samples.sort((a, b) => a.t - b.t);
+  const last: LastStored = new Map();
+  const kept = thin(samples, last);
+  writePrivateHistory(file, kept, false);
+  lastStored.set(file, last);
 
-  return samples;
+  return kept;
 }
 
 /**
@@ -77,11 +108,15 @@ export function recordSnapshot(snapshot: ProviderSnapshot, at: number, file = HI
     }
   }
 
-  if (samples.length > 0) {
-    writePrivateHistory(file, samples, true);
-  }
+  const last: LastStored = new Map(lastStored.get(file));
+  const kept = thin(samples, last);
 
-  return samples;
+  if (kept.length > 0) {
+    writePrivateHistory(file, kept, true);
+  }
+  lastStored.set(file, last);
+
+  return kept;
 }
 
 function openPrivateHistory(file: string, append: boolean): number {

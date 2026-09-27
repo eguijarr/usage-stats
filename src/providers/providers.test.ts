@@ -315,6 +315,24 @@ describe('devin', () => {
     expect(JSON.parse(String(calls[0]?.init?.body)).metadata.apiKey).toBe('key-1');
   });
 
+  test('reads an omitted daily percentage with a reset as an exhausted day', async () => {
+    mkdirSync(join(home, '.local/share/devin'), { recursive: true });
+    writeFileSync(join(home, '.local/share/devin/credentials.toml'), 'windsurf_api_key = "key-1"\n');
+    const reset = Math.floor(Date.now() / 1000) + 3 * 3600;
+    // proto3 JSON leaves out the 0% remaining of a used-up day
+    stubFetch(() => ({
+      body: { userStatus: { planStatus: { planInfo: { planName: 'Pro' }, weeklyQuotaRemainingPercent: 40,
+        dailyQuotaResetAtUnix: String(reset), weeklyQuotaResetAtUnix: String(reset + 2 * 86400) } } },
+    }));
+
+    const result = await devin.probe();
+
+    expect(progressLines(result.lines).map((l) => [l.label, l.used])).toEqual([
+      ['Daily quota', 100],
+      ['Weekly quota', 60],
+    ]);
+  });
+
   test('asks to log in when no key exists', async () => {
     expect(devin.probe()).rejects.toThrow('devin auth login');
   });

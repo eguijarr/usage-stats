@@ -92,6 +92,31 @@ const MAX_LABEL = 32;
 const EIGHTHS = ['', '▏', '▎', '▍', '▌', '▋', '▊', '▉'];
 const SPARK_CHARS = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
+/**
+ * A reading at most this old when a window starts still holds at its
+ * start: longer than the history's 5-minute heartbeat for repeated values
+ * and the slowest 10-minute poll, shorter than a real gap in the history.
+ */
+const CARRY_MS = 15 * 60_000;
+
+/**
+ * One quota's samples inside a window. The history skips repeated values,
+ * so the last reading before the window, when recent, is moved to its
+ * start to keep the value the window opened with.
+ */
+function windowSamples(history: Sample[], providerId: string, label: string, start: number): Sample[] {
+  let before: Sample | null = null;
+  const inside: Sample[] = [];
+
+  for (const sample of history) {
+    if (sample.p !== providerId || sample.l !== label) continue;
+    if (sample.t >= start) inside.push(sample);
+    else if (before === null || sample.t >= before.t) before = sample;
+  }
+
+  return before !== null && start - before.t <= CARRY_MS ? [{ ...before, t: start }, ...inside] : inside;
+}
+
 function progressLines(state: ProviderState): ProgressLine[] {
   return (state.snapshot?.lines ?? []).filter((line): line is ProgressLine => line.type === 'progress');
 }
@@ -209,7 +234,7 @@ function merge(spans: Span[]): Span[] {
  */
 function sparkline(history: Sample[], providerId: string, label: string, now: number): Span[] {
   const start = now - SPARK_WINDOW_MS;
-  const samples = history.filter((sample) => sample.p === providerId && sample.l === label && sample.t >= start);
+  const samples = windowSamples(history, providerId, label, start);
 
   if (samples.length < 2) {
     return [{ text: '·'.repeat(SPARK_CELLS), fg: theme.faint, bg: theme.chartBg }];
@@ -625,6 +650,21 @@ function blockerOf(entry: ResetEntry, now: number): { line: ProgressLine; usedUp
   return capping ?? null;
 }
 
+/**
+ * A shorter window's unused share only goes to waste while the longer
+ * budget it draws from has room. When that budget runs out before its own
+ * reset at this pace, all of it gets used anyway, whatever this window
+ * leaves behind, so steering work here recovers nothing.
+ */
+function parentRunsOut(entry: ResetEntry, now: number): boolean {
+  const reset = Date.parse(entry.line.resetsAt!);
+
+  return progressLines(entry.state).some((line) =>
+    entry.line.dependsOn?.includes(line.label) && line !== entry.line && line.resetsAt !== null &&
+    Date.parse(line.resetsAt) >= reset && forecastOf(line, now, entry.state.lastOk ?? now)?.kind === 'runsOut',
+  );
+}
+
 function constraintFirst(blocker: ReturnType<typeof blockerOf>, forecast: ReturnType<typeof forecastOf>): boolean {
   return blocker !== null && (blocker.usedUp || forecast?.kind !== 'runsOut' || blocker.inMs < forecast.inMs);
 }
@@ -679,6 +719,7 @@ function expiringText(entry: ResetEntry, options: ViewOptions): Span {
 function focusOf(entries: ResetEntry[], options: ViewOptions): ResetEntry | null {
   return entries.find((entry) =>
     resetDataNotice(entry.state, options) === null && blockerOf(entry, options.now) === null &&
+    !parentRunsOut(entry, options.now) &&
     (expiringShare(entry.line, options.now, entry.state.lastOk ?? options.now) ?? 0) >= FOCUS_MIN_EXPIRING,
   ) ?? null;
 }
@@ -981,7 +1022,7 @@ function trendCard(
   chartWidth: number,
 ): Card {
   const start = now - window.ms;
-  const samples = history.filter((sample) => sample.p === providerId && sample.l === line.label && sample.t >= start);
+  const samples = windowSamples(history, providerId, line.label, start);
   const subtitle: Line = [{ text: `% used, last ${window.label}`, fg: theme.muted }];
   const columns = Math.max(20, chartWidth - 16);
   const current = fraction(line);

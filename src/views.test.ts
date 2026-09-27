@@ -117,6 +117,18 @@ describe('views', () => {
     expect(plotted.cards[1]!.lines.length).toBe(8);
   });
 
+  test('a trend opens with the value held from just before its window, since repeats are not stored', () => {
+    const provider = state('a', [weekly(60, 3)]);
+    const inside = [[3, 0.4], [2, 0.5], [1, 0.6]].map(([h, v]) => ({ t: NOW - h! * 3600_000, p: 'a', l: 'Weekly', v: v! }));
+    const opened = (minutesBefore: number) => providerView(provider, [
+      { t: NOW - DAY - minutesBefore * 60_000, p: 'a', l: 'Weekly', v: 0.4 }, ...inside,
+    ], WINDOWS[1]!, OPTIONS, 60).cards[1]!;
+
+    expect(text(opened(2).subtitle)).toContain('↑ +20.0 pts over 24h');
+    // an old reading says nothing about the window's start
+    expect(text(opened(60).lines[1]!)).toContain('3 of 4 readings');
+  });
+
   test('providerView sets headingIcon for heading and keeps strip clean without redundant icon', () => {
     const provider = state('claude', [weekly(40, 3)]);
     const view = providerView(provider, [], WINDOWS[1]!, OPTIONS, 60);
@@ -283,6 +295,19 @@ describe('upcoming resets', () => {
     const card = resetsFor([state('claude', [session, weekly, scoped])]);
     expect(card.lines.map(text).find((row) => row.startsWith('◆ '))).toContain('claude Session');
     expect(card.lines.map(text).join('\n')).not.toContain('blocked by Sonnet');
+  });
+
+  test('does not steer work to a window whose longer budget runs out anyway', () => {
+    // the weekly runs out in ~5h at this pace, so the session's unused share is not waste
+    const session = { ...quota('Session', 10, 5 * HOUR, HOUR), dependsOn: ['Weekly'] };
+    const weekly = { ...quota('Weekly', 90, 7 * DAY, 5 * DAY), dependsOn: ['Session'] };
+    // 4 of 7 days gone at 30%: ~48% of it would expire
+    const other = quota('Weekly', 30, 7 * DAY, 3 * DAY);
+    const states = [state('claude', [session, weekly]), state('codex', [other])];
+    const recommendation = overviewView(states, [], { ...OPTIONS, terminalWidth: 160 }).cards.find((c) => c.title === 'Use next')!;
+
+    expect(recommendation.lines.map(text).join('\n')).toContain('codex Weekly');
+    expect(resetsFor(states).lines.map(text).find((row) => row.startsWith('◆ '))).toContain('codex Weekly');
   });
 
   test('auxiliary allowances like Cursor\'s Grok bot stay out of the planning', () => {

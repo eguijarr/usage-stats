@@ -7,6 +7,19 @@ El formato sigue [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y e
 
 ## [Unreleased]
 
+### Corregido
+
+- **Use next** ya no recomienda una sesión o cuota diaria cuando la cuota semanal de la que descuenta se
+  agotará antes de su reinicio al ritmo actual: ese saldo sin usar no se pierde, y la recomendación pasa a
+  la cuota que sí caducaría sin usarse.
+- **Devin**: una cuota diaria agotada ya no desaparece. La API omite el 0 % restante (proto3), igual que
+  ya se trataba en la semanal.
+
+### Cambiado
+
+- El histórico guarda una lectura repetida solo cada 5 minutos (antes, una por sondeo) y adelgaza al
+  arrancar los ficheros existentes; las gráficas y sparklines se dibujan igual con ~90 % menos filas.
+
 ## [0.1.0] - 2026-09-26
 
 Primera versión pública.

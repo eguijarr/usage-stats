@@ -92,12 +92,16 @@ interface PlanStatus {
 
 function buildResult(status: PlanStatus): { plan: string; lines: MetricLine[] } {
   const hideDaily = status.planInfo?.hideDailyQuota === true;
-  const daily = num(status.dailyQuotaRemainingPercent);
+  let daily = num(status.dailyQuotaRemainingPercent);
   let weekly = num(status.weeklyQuotaRemainingPercent);
   const dailyReset = hideDaily ? null : toIso(status.dailyQuotaResetAtUnix);
   const weeklyReset = toIso(status.weeklyQuotaResetAtUnix);
 
-  // proto3 JSON drops zeros, so a weekly reset without a percentage is an exhausted window
+  // proto3 JSON drops zeros, so a reset without a percentage is an exhausted window
+  if (daily === null && dailyReset) {
+    daily = 0;
+  }
+
   if (weekly === null && weeklyReset) {
     weekly = 0;
   }
