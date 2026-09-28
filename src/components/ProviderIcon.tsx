@@ -12,7 +12,7 @@ import { useRenderer } from '@opentui/react';
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useSyncExternalStore } from 'react';
 import { decodePng, encodeSixel, type RgbaImage } from '../sixel';
 import { brandColor } from '../views';
 
@@ -105,30 +105,79 @@ export function chooseImageProtocol(
 }
 
 /**
+ * The protocol every logo on one renderer reads. The first mounted icon
+ * attaches a single CAPABILITIES and a single RESIZE listener, and the
+ * last one to unmount removes them, so a screen full of logos does not
+ * pile listeners onto the renderer.
+ */
+type ProtocolStore = {
+  subscribe: (listener: () => void) => () => void;
+  get: () => ImageRenderProtocol | null;
+};
+
+const protocolStores = new WeakMap<CliRenderer, ProtocolStore>();
+
+function protocolStore(renderer: CliRenderer): ProtocolStore {
+  const existing = protocolStores.get(renderer);
+
+  if (existing) {
+    return existing;
+  }
+
+  const read = () => chooseImageProtocol(renderer.capabilities, renderer.resolution !== null);
+  const listeners = new Set<() => void>();
+  let protocol = read();
+
+  const update = () => {
+    const next = read();
+
+    if (next === protocol) {
+      return;
+    }
+
+    protocol = next;
+
+    for (const listener of listeners) {
+      listener();
+    }
+  };
+
+  const store: ProtocolStore = {
+    subscribe(listener) {
+      listeners.add(listener);
+
+      if (listeners.size === 1) {
+        renderer.on(CliRenderEvents.CAPABILITIES, update);
+        renderer.on(CliRenderEvents.RESIZE, update);
+        // catch anything that arrived while nobody was listening
+        update();
+      }
+
+      return () => {
+        listeners.delete(listener);
+
+        if (listeners.size === 0) {
+          renderer.off(CliRenderEvents.CAPABILITIES, update);
+          renderer.off(CliRenderEvents.RESIZE, update);
+        }
+      };
+    },
+    get: () => protocol,
+  };
+
+  protocolStores.set(renderer, store);
+
+  return store;
+}
+
+/**
  * Tracks the protocol for logos. Capabilities and the pixel size arrive
  * asynchronously after startup, so the choice is re-read when they do.
  */
 function useImageProtocol(): ImageRenderProtocol | null {
-  const renderer = useRenderer();
-  const read = () => chooseImageProtocol(renderer.capabilities, renderer.resolution !== null);
-  const [protocol, setProtocol] = useState(read);
+  const store = protocolStore(useRenderer());
 
-  useEffect(() => {
-    const update = () => setProtocol(read());
-
-    renderer.on(CliRenderEvents.CAPABILITIES, update);
-    renderer.on(CliRenderEvents.RESIZE, update);
-    update();
-
-    return () => {
-      renderer.off(CliRenderEvents.CAPABILITIES, update);
-      renderer.off(CliRenderEvents.RESIZE, update);
-    };
-    // read only closes over the renderer
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [renderer]);
-
-  return protocol;
+  return useSyncExternalStore(store.subscribe, store.get, store.get);
 }
 
 // --- sixel overlay ---------------------------------------------------------

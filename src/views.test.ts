@@ -282,6 +282,27 @@ describe('upcoming resets', () => {
     expect(blocked.lines.some((row) => text(row).startsWith('◆ '))).toBe(false);
   });
 
+  test('a quota without a future reset keeps its row with an unknown countdown', () => {
+    const undated = { ...weekly(10, 3), label: 'Session', periodDurationMs: 5 * 3600_000, resetsAt: null };
+    const past = { ...weekly(40, 3), resetsAt: new Date(NOW - DAY).toISOString() };
+    const noCadence = { ...weekly(10, 3), label: 'Credits', periodDurationMs: null, resetsAt: null };
+
+    for (const terminalWidth of [160, 70]) {
+      const view = overviewView([state('claude', [undated, past, noCadence])], [], { ...OPTIONS, terminalWidth });
+      // nothing to recommend without a real reset date
+      expect(view.cards.some((c) => c.title === 'Use next')).toBe(false);
+      const rows = view.cards.find((c) => c.title === 'Upcoming resets')!.lines.map(text);
+      expect(rows.find((row) => row.includes('claude Session'))).toBeDefined();
+      expect(rows.some((row) => row.includes('unknown'))).toBe(true);
+      expect(rows.some((row) => row.includes('claude Weekly'))).toBe(true);
+      expect(rows.some((row) => row.includes('Credits'))).toBe(false);
+    }
+
+    // a dated quota still leads the recommendation alongside an undated one
+    const mixed = overviewView([state('claude', [undated, weekly(20, 3)])], [], { ...OPTIONS, terminalWidth: 160 });
+    expect(text(mixed.cards.find((c) => c.title === 'Use next')!.subtitle)).toContain('resets in 3d');
+  });
+
   const resetsFor = (states: ProviderState[]) => overviewView(states, [], { ...OPTIONS, terminalWidth: 160 })
     .cards.find((card) => card.title === 'Upcoming resets')!;
 

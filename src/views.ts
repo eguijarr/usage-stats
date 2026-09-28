@@ -289,6 +289,23 @@ function sparkline(history: Sample[], providerId: string, label: string, now: nu
   );
 }
 
+/**
+ * When a quota next resets, or null when the provider sent no date, one
+ * that does not parse, or one already past. Only such a date drives
+ * countdowns, forecasts and priorities.
+ */
+export function nextResetAt(line: ProgressLine, now: number): number | null {
+  if (line.resetsAt === null) return null;
+  const reset = Date.parse(line.resetsAt);
+  return Number.isFinite(reset) && reset > now ? reset : null;
+}
+
+/** The countdown to a quota's next reset, or "unknown" without one. */
+export function resetEta(line: ProgressLine, now: number): string {
+  const reset = nextResetAt(line, now);
+  return reset === null ? 'unknown' : formatDuration(reset - now);
+}
+
 function resetIn(line: ProgressLine, now: number): string {
   if (line.resetsAt === null) {
     return '';
@@ -584,11 +601,18 @@ export function overviewView(allStates: ProviderState[], history: Sample[], opti
   const failed = states.filter((state) => state.error !== null).length;
 
   const all = states.flatMap((state) => progressLines(state).map((line) => ({ state, line })));
-  const resets: ResetEntry[] = all
-    .filter(({ line }) => !line.auxiliary && Number.isFinite(line.used) && line.used >= 0 &&
-      Number.isFinite(line.limit) && line.limit > 0 && line.resetsAt !== null && Date.parse(line.resetsAt) > now)
-    .sort((a, b) => Date.parse(a.line.resetsAt!) - Date.parse(b.line.resetsAt!))
+  const valid = all.filter(({ line }) => !line.auxiliary && Number.isFinite(line.used) && line.used >= 0 &&
+    Number.isFinite(line.limit) && line.limit > 0);
+  // recommendations, alerts and priorities only weigh quotas with a real future reset
+  const resets: ResetEntry[] = valid
+    .filter(({ line }) => nextResetAt(line, now) !== null)
+    .sort((a, b) => nextResetAt(a.line, now)! - nextResetAt(b.line, now)!)
     .map(({ state, line }) => ({ state, line, fast: fastBurnFor(line, state, history, options) }));
+  // a quota whose provider sent no future reset still gets its row when its cadence is known,
+  // like Claude's session between windows, with the countdown shown as unknown
+  const undated: ResetEntry[] = valid
+    .filter(({ line }) => nextResetAt(line, now) === null && resetGroupOf(line) !== 'other')
+    .map(({ state, line }) => ({ state, line, fast: null }));
   const atRisk = resets.filter(({ state, line }) => {
     if (line.auxiliary || resetDataNotice(state, options) !== null) return false;
     const kind = forecastFor(line, state, options)?.kind;
@@ -626,10 +650,10 @@ export function overviewView(allStates: ProviderState[], history: Sample[], opti
 
   const panelWidth = Math.max(20, (options.terminalWidth ?? 140) - 4);
   const cards: Card[] = [];
-  if (resets.length > 0) {
+  if (resets.length > 0 || undated.length > 0) {
     const focus = focusOf(resets, options);
-    cards.push(recommendationCard(resets, focus, options, panelWidth));
-    cards.push(resetsCard(resets, focus, options, panelWidth));
+    if (resets.length > 0) cards.push(recommendationCard(resets, focus, options, panelWidth));
+    cards.push(resetsCard([...resets, ...undated], focus, options, panelWidth));
   }
 
   const columnWidth = states.length > 1 && panelWidth >= 116 ? Math.floor((panelWidth - 4) / 2) : panelWidth;
@@ -678,23 +702,25 @@ function blockerOf(entry: ResetEntry, options: ViewOptions): { line: ProgressLin
   const { now } = options;
   const others = progressLines(entry.state).filter((line) =>
     entry.line.dependsOn?.includes(line.label) && line !== entry.line && line.limit > 0 &&
-    (line.resetsAt === null || Date.parse(line.resetsAt) > now),
+    (line.resetsAt === null || nextResetAt(line, now) !== null),
   );
   // Every exhausted dependency must refill before work can resume.
   const usedUp = others.filter((line) => line.used >= line.limit)
-    .sort((a, b) => (b.resetsAt === null ? Infinity : Date.parse(b.resetsAt)) -
-      (a.resetsAt === null ? Infinity : Date.parse(a.resetsAt)))[0];
+    .sort((a, b) => (nextResetAt(b, now) ?? Infinity) - (nextResetAt(a, now) ?? Infinity))[0];
 
   if (usedUp !== undefined) {
     return { line: usedUp, usedUp: true, inMs: 0 };
   }
 
-  const reset = Date.parse(entry.line.resetsAt!);
+  // without a future reset of its own there is no window for another quota to cap
+  const reset = nextResetAt(entry.line, now);
+  if (reset === null) return null;
   const capping = others.flatMap((line) => {
     const forecast = forecastFor(line, entry.state, options);
+    const lineReset = nextResetAt(line, now);
     // A shorter window can refill several times before this quota resets.
     return forecast?.kind === 'runsOut' && now + forecast.inMs < reset &&
-      line.resetsAt !== null && Date.parse(line.resetsAt) >= reset
+      lineReset !== null && lineReset >= reset
       ? [{ line, usedUp: false, inMs: forecast.inMs }] : [];
   }).sort((a, b) => a.inMs - b.inMs)[0];
 
@@ -708,12 +734,14 @@ function blockerOf(entry: ResetEntry, options: ViewOptions): { line: ProgressLin
  * leaves behind, so steering work here recovers nothing.
  */
 function parentRunsOut(entry: ResetEntry, options: ViewOptions): boolean {
-  const reset = Date.parse(entry.line.resetsAt!);
+  const reset = nextResetAt(entry.line, options.now);
+  if (reset === null) return false;
 
-  return progressLines(entry.state).some((line) =>
-    entry.line.dependsOn?.includes(line.label) && line !== entry.line && line.resetsAt !== null &&
-    Date.parse(line.resetsAt) >= reset && forecastFor(line, entry.state, options)?.kind === 'runsOut',
-  );
+  return progressLines(entry.state).some((line) => {
+    const lineReset = nextResetAt(line, options.now);
+    return entry.line.dependsOn?.includes(line.label) && line !== entry.line && lineReset !== null &&
+      lineReset >= reset && forecastFor(line, entry.state, options)?.kind === 'runsOut';
+  });
 }
 
 function constraintFirst(blocker: ReturnType<typeof blockerOf>, forecast: ReturnType<typeof forecastOf>): boolean {
@@ -806,7 +834,7 @@ function recommendationCard(entries: ResetEntry[], focus: ResetEntry | null, opt
     ...row.map((span) => ({ ...span, bg: theme.selectedBg })),
     { text: ' '.repeat(width - 1 - lineWidth(row)), bg: theme.selectedBg },
   ]);
-  const reset = formatDuration(Date.parse(focus.line.resetsAt!) - options.now);
+  const reset = resetEta(focus.line, options.now);
   return card('Use next', [{ text: `resets in ${reset}`, fg: theme.accent }], lines, true, { text: '◆', fg: theme.accent });
 }
 
@@ -827,7 +855,7 @@ function compactResetRows(entry: ResetEntry, options: ViewOptions, width: number
     ...row,
   ]);
   const reset: Span = {
-    text: `reset ${formatDuration(Date.parse(entry.line.resetsAt!) - options.now)}`,
+    text: `reset ${resetEta(entry.line, options.now)}`,
     fg: isFocus ? theme.accent : theme.muted,
   };
   const last = lines.at(-1)!;
@@ -894,7 +922,7 @@ function resetsCard(resets: ResetEntry[], focus: ResetEntry | null, options: Vie
         { text: shortLabel(name, nameWidth) + '  ', fg: selected ? theme.accent : theme.text },
         ...bar(used, barWidth, resetUsageColor(entry, options, selected), 'subtle', 1),
         { text: ' ' + padStart(formatPercent(used), 6), fg: theme.text },
-        { text: '   ' + padStart(formatDuration(Date.parse(entry.line.resetsAt!) - options.now), resetWidth), fg: selected ? theme.accent : theme.muted },
+        { text: '   ' + padStart(resetEta(entry.line, options.now), resetWidth), fg: selected ? theme.accent : theme.muted },
       ];
       const fitsOutlook = inlineOutlook && outlook.text.length <= outlookWidth;
       if (fitsOutlook) row.push({ text: '   ' }, outlook);
@@ -1309,8 +1337,8 @@ export function footerView(states: ProviderState[], history: Sample[], options: 
   const entries: ResetEntry[] = states
     .flatMap((state) => progressLines(state).filter((line) => !line.detailOnly).map((line) => ({ state, line })))
     .filter(({ line }) => !line.auxiliary && Number.isFinite(line.used) && line.used >= 0 &&
-      Number.isFinite(line.limit) && line.limit > 0 && line.resetsAt !== null && Date.parse(line.resetsAt) > now)
-    .sort((a, b) => Date.parse(a.line.resetsAt!) - Date.parse(b.line.resetsAt!))
+      Number.isFinite(line.limit) && line.limit > 0 && nextResetAt(line, now) !== null)
+    .sort((a, b) => nextResetAt(a.line, now)! - nextResetAt(b.line, now)!)
     .map(({ state, line }) => ({ state, line, fast: fastBurnFor(line, state, history, options) }));
   const focus = focusOf(entries, options);
   const fast = entries.filter((entry) => entry.fast !== null && resetDataNotice(entry.state, options) === null);
@@ -1322,7 +1350,7 @@ export function footerView(states: ProviderState[], history: Sample[], options: 
         { text: '● ', fg: brandColor(focus.state.id), icon: focus.state.id },
         { text: entryName(focus), fg: theme.text, bold: true },
         { text: ` · ~${formatPercent(expiringShare(focus.line, now, focus.state.lastOk ?? now, options.profile ?? null)!)} would expire`, fg: theme.muted },
-        { text: ` · resets in ${formatDuration(Date.parse(focus.line.resetsAt!) - now)}`, fg: theme.accent },
+        { text: ` · resets in ${resetEta(focus.line, now)}`, fg: theme.accent },
       ]];
 
   const nameWidth = Math.min(16, Math.max(6, ...states.map((state) => displayName(state).length)));
@@ -1371,7 +1399,7 @@ export function footerView(states: ProviderState[], history: Sample[], options: 
     focus: focus === null ? null : { key: entryKey(focus), text: [
       { text: '◆ Use next ', fg: theme.accent },
       { text: entryName(focus), fg: theme.text, bold: true },
-      { text: ` · ~${formatPercent(expiringShare(focus.line, now, focus.state.lastOk ?? now, options.profile ?? null)!)} would expire in ${formatDuration(Date.parse(focus.line.resetsAt!) - now)}`, fg: theme.muted },
+      { text: ` · ~${formatPercent(expiringShare(focus.line, now, focus.state.lastOk ?? now, options.profile ?? null)!)} would expire in ${resetEta(focus.line, now)}`, fg: theme.muted },
     ] },
     fast: fast.map((entry) => ({ key: entryKey(entry), text: [
       { text: entryName(entry), fg: theme.text },
